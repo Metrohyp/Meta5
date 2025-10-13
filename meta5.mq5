@@ -204,7 +204,7 @@ input bool           Scalp_Use_Fixed_Lot   = true;
 input double         Fixed_Lots_Scalp      = 1.00;
 
 // If NOT using fixed lot: scalps risk = (Risk_Percent × Scalp_Risk_Mult), unless Risk_Percent_Scalp > 0
-input double         Scalp_Risk_Mult       = 3.0; // e.g., 3× main risk%
+input double         Scalp_Risk_Mult       = 2.0; // e.g., 3× main risk%
 input double         Risk_Percent_Scalp    = 6;   // if >0, overrides and uses this absolute % just for scalps
 
 
