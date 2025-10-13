@@ -1,9 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                        V25_SuperTrend_Alligator  |
-//| Deriv V25: M15 entries, H1/H4 filters, SuperTrend(10,3),         |
-//| Alligator (13/8,8/5,5/3 SMMA HL/2), AO, W%R(14).                 |
-//| SL via swings (+ATR buffer) and TP via RR or Fib extension.      |
-//| Sends signals/executions to Telegram.                            |
+//|                                         Nodezilla101_EA_BOT      |
+//|                                                                  |
+//| Automated trading bot using a triple-confirmation strategy.      |
+//| Features smart SL/TP placement and instant Telegram alerts.      |
+//|                                                                  |
+//| Custom bots & advanced settings available upon request.          |
+//| Contact: [+2348162150628] | [Nodezilla101@gmail.com]             |
 //+------------------------------------------------------------------+
 #property strict
 #include <Trade/Trade.mqh>
@@ -91,9 +93,9 @@ input double Scalp_TP_Swing_Ext_ATR_Mult = 1.50;
 input double         BE_Activation_TP_Percent = 20.0;
 
 // ATR trailing stop (dynamic SL that follows price). Disable if you want “hold for big R”.
-input bool           Use_ATR_Trailing   = false;
+input bool           Use_ATR_Trailing   = true;
 input int            ATR_Period_Trail   = 10;
-input double         ATR_Trail_Mult     = 1.5;
+input double         ATR_Trail_Mult     = 3.5;
 
 // “Half-step” trailing for MAIN trades: as price approaches TP, nudge SL forward by half the progress
 input bool           Use_HalfStep_Trailing = false;
@@ -160,7 +162,7 @@ input bool           ApplyToManualTrades     = true;
 input bool           Manual_Set_Initial_SLTP = false;
 
 // Manual TP style when missing: true = Fib 161.8% ; false = (ignored if manual TP range+fallback is used)
-input bool           Manual_Use_Fib_Targets  = false;
+input bool           Manual_Use_Fib_Targets  = true;
 
 
 //============================== SCALPING ENGINE =============================
@@ -1661,7 +1663,7 @@ void ManageOpenPositions()
 if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0) 
 {
     // Define a tiny buffer to guarantee the modification is an 'improvement' to the broker
-    const double BE_Buffer = 1.0 * _Point; // Move SL to entry + 1 Point (guaranteed improvement)
+    const double BE_Buffer = 100.0 * _Point; // Move SL to entry + 1 Point (guaranteed improvement)
 
     double totalDistToTP = (type == POSITION_TYPE_BUY) ?
         (tp - entry) : (entry - tp);
