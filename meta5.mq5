@@ -12,252 +12,162 @@
 CTrade Trade;
 
 //============================== Inputs ==============================
-//============================== CORE / GENERAL ==============================
-// Timeframe to EXECUTE the main strategy on (your working chart timeframe)
-input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;
+//================================================================================
+//                 --- CORE STRATEGY & RISK CONTROLS ---
+//================================================================================
+// These are the most important settings you will adjust day-to-day.
 
-// Extra higher-timeframe alignment (M15 longs only if H1/H4 are also up, etc.)
-input bool           Use_H1H4_Filter  = true;
+// --- General ---
+input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place trades, false = signals only
 
-// Unique ID for this EA instance (must differ per chart/strategy instance)
-input long           Magic            = 250925;
+// --- Main Strategy ---
+input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
+input double         Risk_Percent     = 0;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
 
-// Auto place orders (true) or just send signals/alerts to Telegram (false)
-input bool           Auto_Trade       = true;
-
-// If true, EA keeps only ONE open position per symbol/magic at a time
-input bool           One_Trade_At_A_Time = false;
-
-
-//============================== HIGHER-TF BREAKOUT FILTER ===================
-// Filters entries to trade only when the higher timeframe just broke key S/R
-input bool           Use_HTF_Breakout_Filter = false; // master switch
-input ENUM_TIMEFRAMES TF_HTF_Breakout        = PERIOD_H1;  // HTF to watch (e.g., H4)
-input int            HTF_Breakout_Lookback   = 600;        // bars to scan for pivots
-input double         HTF_Breakout_ATR_Margin = 0.12;       // how far beyond S/R counts as a breakout (in ATRs)
-input int            HTF_Breakout_Mode       = 0;          // 0 = S/R OR Trendline; 1 = S/R AND Trendline
-input int            HTF_Breakout_MaxAgeBars = 3;          // accept only fresh breakouts (<= N closed bars old)
+// --- Scalp Strategy ---
+input bool           Use_Scalp_Mode   = true;     // MASTER SWITCH: Turn the scalping engine on/off.
+input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // The timeframe the scalp strategy reads from.
+input bool           Scalp_Use_Fixed_Lot = true;  // true = use fixed lot below, false = use risk %
+input double         Fixed_Lots_Scalp = 1.00;      // Lot size for scalp trades.
+input double         Risk_Percent_Scalp = 6;      // if >0, overrides and uses this absolute % just for scalps
 
 
-//============================== RISK & POSITION SIZING ======================
-// Main trades: percent of account risked per trade. 0 = ignore risk % and use Fixed_Lots
-input double         Risk_Percent       = 1.0;
+//================================================================================
+//                 --- TRADE MANAGEMENT & EXITS ---
+//================================================================================
+// Controls how trades are managed after they are opened.
 
-// Main trades: fixed lot if Risk_Percent = 0 (EA auto-clamps to broker min/step/max)
-input double         Fixed_Lots         = 0.10;
+// --- Trailing Stops ---
+input bool           Use_ATR_Trailing   = false;    // Dynamic SL that follows price based on volatility.
+input double         ATR_Trail_Mult     = 3.5;      // Multiplier for ATR Trail. Higher = wider trail.
+input bool           Use_HalfStep_Trailing = true;  // Alternative trail: SL moves half the distance to TP.
 
+// --- Break-Even ---
+input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
 
-//============================== SL/TP STYLE (MAIN) ==========================
-// Add extra cushion behind swing SL by this multiple of ATR (bigger = safer, smaller = tighter)
-input double         ATR_SL_Buffer_Mult = 0.1;
+// --- Emergency Exit ---
+input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
+input double         CircuitBreaker_ATR_Mult = 4.5;    // Closes all if a candle is > X times the average size.
 
-// Take profit style for MAIN trades:
-// true = use Fib extension (161.8%) from the swing; false = (ignored if you use TP range+fallback)
-input bool           Use_Fib_Targets    = true;
-
-input bool Protect_Scalp_SLTP = false;   // don’t auto-modify SL/TP for “Scalp” positions
-input bool Adjust_All_Exclude_Scalps = false;  // skip scalps when bulk-adjusting SL/TP
-
-// --- Dynamic SL (ATR-based; used for Main, Manual, Scalp when setting/placing SL)
-input bool   Use_Dynamic_SL_ATR   = true;  // enable dynamic ATR-based SL
-input double SL_ATR_Min           = 2;   // minimum SL distance = Min × ATR
-input double SL_ATR_Max           = 6.0;   // maximum SL distance = Max × ATR
-input double SL_Swing_Pad_ATR     = 0.60;  // keep SL beyond swing by this ATR pad
-
-// --- Dynamic TP by RR range (MAIN)
-input bool   Use_RR_Range         = true;  // try RR range first
-input double RR_Min               = 3.0;
-input double RR_Max               = 10.0;
-input double TP_Max_ATR_Mult      = 8.0;   // TP must be ≤ this ATRs from entry
-input double TP_Swing_Ext_ATR_Mult= 1.50;  // allow some extension past last swing
-// NOTE: if range fails, MAIN falls back to Fib regardless of Use_Fib_Targets
-
-// --- Dynamic TP (MANUAL when EA sets missing TP)
-input bool   Manual_Use_RR_Range         = true;
-input double Manual_RR_Min               = 3.0;
-input double Manual_RR_Max               = 10.0;
-input double Manual_TP_Max_ATR_Mult      = 6.0;
-input double Manual_TP_Swing_Ext_ATR_Mult= 1.50;
-
-// --- Dynamic TP (SCALP)
-input bool   Scalp_Use_RR_Range          = true;
-input double Scalp_RR_Min                = 3.0;
-input double Scalp_RR_Max                = 10.0;
-input double Scalp_TP_Max_ATR_Mult       = 6.0;
-input double Scalp_TP_Swing_Ext_ATR_Mult = 1.50;
+// --- Profit Targets (Risk/Reward) ---
+input double         RR_Min           = 3.0;      // MINIMUM R:R for main trades.
+input double         RR_Max           = 10.0;     // MAXIMUM R:R for main trades.
+input double         Scalp_RR_Min     = 3.0;      // MINIMUM R:R for scalp trades.
+input double         Scalp_RR_Max     = 10.0;     // MAXIMUM R:R for scalp trades.
 
 
-//============================== BREAKEVEN & TRAILING ========================
-// Move SL to BE when price has covered X% of the distance from entry to your TP
-// (Example: 50.0 = when price is halfway to TP, start BE action)
-input double         BE_Activation_TP_Percent = 20.0;
+//================================================================================
+//                 --- ENTRY FILTERS & QUALITY CONTROLS ---
+//================================================================================
+// These settings make the EA more selective about which trades to take.
 
-// ATR trailing stop (dynamic SL that follows price). Disable if you want “hold for big R”.
-input bool           Use_ATR_Trailing   = true;
-input int            ATR_Period_Trail   = 10;
-input double         ATR_Trail_Mult     = 3.5;
+// --- Main Strategy Filters ---
+input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
+input bool           Use_ST_Flip_Retest = true;      // Wait for price to pull back to the ST line before entry.
+input bool           Use_HTF_Breakout_Filter = false;// Require a breakout on a higher timeframe.
+input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;  // Timeframe for the breakout filter.
+input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
+input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
-// “Half-step” trailing for MAIN trades: as price approaches TP, nudge SL forward by half the progress
-input bool           Use_HalfStep_Trailing = false;
-// Only update that half-step on new bars (true) or allow intrabar updates (false)
-input bool           HalfTrail_NewBar_Only = true;
-
-
-//============================== QUALITY / SAFETY GUARDS =====================
-// Minimum SL size: at least (Min_SL_ATR_Mult × ATR) OR Min_SL_Points, whichever is bigger
-// Helps avoid tiny stops that cause frequent stop-outs or invalid-stops errors
-input double         Min_SL_ATR_Mult  = 0.8;
-input int            Min_SL_Points    = 0;
-
-// Optionally push SL beyond the SuperTrend line by a small ATR pad (extra breathing room)
-input bool           Use_ST_as_Stop   = true;
-input double         ST_Stop_Pad_Mult = 0.8;  // 0.10 × ATR pad around ST line
-
-// --- Volatility Circuit Breaker (Emergency Stop) ---
-input bool   Use_Volatility_CircuitBreaker = true;   // Master switch for the emergency brake
-input double CircuitBreaker_ATR_Mult     = 4.0;    // e.g., 4.0 = close all if current candle > 4x ATR
-
-//============================== ENTRY CONFIRMATIONS (MAIN) ==================
-// Require a fresh SuperTrend flip + a retest of the ST line before placing the FIRST entry
-input bool           Use_ST_Flip_Retest   = true;
-
-// How close to the ST line counts as a valid “retest” (in ATRs)
-input double         Retest_ATR_Tolerance = 0.15;
-
-// Allow “staged” entries on deeper retracements (1 = only main, 2 = add 1 more, 3 = add 2 more)
-input int            Max_Entry_Stages     = 4;
-
-// When to add the next stage: when floating loss reaches this % of the distance to SL (e.g., 0.85 = 85%)
-input double         AddEntry_Trigger_Ratio = 0.85;
-
-// After adding a new stage, re-anchor SL/TP of ALL open MAIN trades to the latest basis
-input bool           Adjust_All_To_Latest = true;
+// --- Scalp Strategy Filters ---
+input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
+input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_M15; // Timeframe for the scalp alignment filter.
+input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
+input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
 
 
-// Anti-early-entry: wait at least this many closed bars after the fresh ST flip
-input int            Min_Bars_After_Flip    = 1;
+//================================================================================
+//                --- ADVANCED & SYSTEM SETTINGS ---
+//================================================================================
+// Fine-tuning parameters. Adjust with caution.
 
-// Also require the confirmation bar[1] close to be this far beyond ST (in ATRs) to avoid edge touches
-input double         Confirm_Close_Dist_ATR = 0.10;
+// --- Indicator Settings ---
+input int            ST_ATR_Period    = 10;
+input double         ST_ATR_Mult      = 3.0;
+input int            Jaw_Period       = 13;
+input int            Jaw_Shift        = 8;
+input int            Teeth_Period     = 8;
+input int            Teeth_Shift      = 5;
+input int            Lips_Period      = 5;
+input int            Lips_Shift       = 3;
+input double         AO_Min_Strength  = 0.0;
+input double         AO_Scalp_Min_Strength = 3;
+input bool           Use_WPR_Bias     = true;
+input bool           Use_WPR_Cross    = false;
 
-
-// Entry gate style: require either a pullback to ST (“retrace”) OR a breakout beyond last swing by margin
-input bool           Require_Retrace_Or_Breakout = false;
-input double         Breakout_ATR_Margin        = 0.10; // how far beyond swing qualifies as a breakout (in ATRs)
-
-
-//============================== PENDING ORDERS (MAIN) =======================
-// Safer than market: place BuyStop/SellStop beyond the confirmation bar’s high/low, instead of jumping in at market
-input bool           Use_Pending_Stop_Entries = false;
-
-// How far away to set the "Limit" from the current candle's high or low (in ATRs); helps avoid immediate whipsaws
-input double         StopEntry_Offset_ATR     = 0.1;
-
-// Cancel unfilled pending after N bars (prevents stale orders sitting on the book)
-input int            StopEntry_Expiry_Bars    = 4;
-
-
-//============================== MANUAL TRADES MANAGEMENT ====================
-// Manage manual positions (magic = 0) on this symbol (apply SL/TP, BE/trailing if enabled)
-input bool           ApplyToManualTrades     = true;
-
-// If a manual trade has NO SL/TP, set them once using your swing/ATR/TP logic
-input bool           Manual_Set_Initial_SLTP = false;
-
-// Manual TP style when missing: true = Fib 161.8% ; false = (ignored if manual TP range+fallback is used)
-input bool           Manual_Use_Fib_Targets  = true;
-
-
-//============================== SCALPING ENGINE =============================
-// Turn on the scalp sub-strategy (fast Alligator + AO logic) while waiting for main entries
-input bool           Use_Scalp_Mode               = true;
-
-// Timeframe the scalp logic reads from (can be M1/M5/M15, etc.)
-input ENUM_TIMEFRAMES TF_Scalp                    = PERIOD_M15;
-
-// If true, block scalps whenever a MAIN EA position is open (keeps book clean)
-input bool           Scalp_Only_When_No_Main      = false;
-
-// Max number of concurrent scalp positions allowed at once (for this symbol/EA)
-input int            Scalp_Max_Concurrent         = 6;
-
-// AO filter for scalps: require AO magnitude ≥ this value, in the direction of the scalp
-input double         AO_Scalp_Min_Strength        = 3;
-
-// ATR period for scalp SL/TP calculations
-input int            Scalp_ATR_Period             = 10;
-
-// Scalp stop distance = Scalp_SL_ATR_Mult × ATR (tighter than main SL by design)
-input double         Scalp_SL_ATR_Mult            = 0.5;
-
-// Use pending stops for scalps as well (safer fills than market)
+// --- Pending Order Mechanics ---
+input bool           Use_Pending_Stop_Entries = true;
+input double         StopEntry_Offset_ATR = 0.1;
+input int            StopEntry_Expiry_Bars = 6;
 input bool           Scalp_Use_Pending_Stop_Entries = true;
-
-// How far beyond bar[1] high/low to place scalp stop orders (in ATRs)
-input double         Scalp_StopEntry_Offset_ATR     = 0.02;
-
-// Cancel unfilled scalp pending after N bars
-input int            Scalp_StopEntry_Expiry_Bars    = 3;
+input double         Scalp_StopEntry_Offset_ATR = 0.02;
+input int            Scalp_StopEntry_Expiry_Bars = 6;
 input double         Scalp_Market_Entry_ATR_Zone = 1.5;
 
+// --- Manual Trade Management ---
+input bool           ApplyToManualTrades = true;
+input bool           Manual_Set_Initial_SLTP = false;
+input bool           Manual_Use_Fib_Targets = true;
+input bool           Manual_Use_RR_Range = true;
+input double         Manual_RR_Min      = 3.0;
+input double         Manual_RR_Max      = 10.0;
+input double         Manual_TP_Max_ATR_Mult = 6.0;
+input double         Manual_TP_Swing_Ext_ATR_Mult = 1.50;
 
-//============================== SCALP RISK SETTINGS =========================
-// Use a FIXED lot for scalps (ignore risk %). EA will clamp to broker limits automatically.
-input bool           Scalp_Use_Fixed_Lot   = true;
-input double         Fixed_Lots_Scalp      = 1.00;
+// --- Detailed SL/TP Mechanics ---
+input bool           Use_Fib_Targets    = true;
+input bool           Use_RR_Range       = true;
+input bool           Scalp_Use_RR_Range = true;
+input bool           Use_Dynamic_SL_ATR = true;
+input double         ATR_SL_Buffer_Mult = 0.1;
+input double         SL_ATR_Min         = 2;
+input double         SL_ATR_Max         = 6.0;
+input double         SL_Swing_Pad_ATR   = 0.60;
+input double         Min_SL_ATR_Mult    = 0.8;
+input int            Min_SL_Points      = 0;
+input bool           Use_ST_as_Stop     = true;
+input double         ST_Stop_Pad_Mult   = 0.8;
+input double         TP_Max_ATR_Mult    = 8.0;
+input double         TP_Swing_Ext_ATR_Mult = 1.50;
+input double         Scalp_TP_Max_ATR_Mult = 6.0;
+input double         Scalp_TP_Swing_Ext_ATR_Mult = 1.50;
+input int            Scalp_ATR_Period   = 10;
+input double         Scalp_SL_ATR_Mult  = 0.5;
+input bool           Protect_Scalp_SLTP = false;
+input bool           Adjust_All_Exclude_Scalps = false;
 
-// If NOT using fixed lot: scalps risk = (Risk_Percent × Scalp_Risk_Mult), unless Risk_Percent_Scalp > 0
-input double         Scalp_Risk_Mult       = 2.0; // e.g., 3× main risk%
-input double         Risk_Percent_Scalp    = 6;   // if >0, overrides and uses this absolute % just for scalps
+// --- Detailed Filter Mechanics ---
+input int            HTF_Breakout_Lookback = 600;
+input double         HTF_Breakout_ATR_Margin = 0.12;
+input int            HTF_Breakout_Mode  = 0;
+input int            HTF_Breakout_MaxAgeBars = 3;
+input double         Retest_ATR_Tolerance = 0.15;
+input double         AddEntry_Trigger_Ratio = 0.85;
+input bool           Adjust_All_To_Latest = true;
+input int            Min_Bars_After_Flip = 1;
+input double         Confirm_Close_Dist_ATR = 0.10;
+input bool           Require_Retrace_Or_Breakout = false;
+input double         Breakout_ATR_Margin = 0.10;
+input double         Scalp_Gate_ATR_Margin = 0.10;
+input double         Scalp_Risk_Mult    = 2.0;
 
-
-//============================== SCALP HTF GATE (OPTIONAL) ===================
-// Only allow scalps that align with a higher timeframe breakout (momentum filter)
-input bool           Scalp_Gate_By_HTF     = false;
-input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF    = PERIOD_M15; // e.g., gate M5 scalps with H1 breakouts
-input double         Scalp_Gate_ATR_Margin = 0.10;      // how “clean” the HTF breakout must be (in ATRs)
-
-
-//============================== INDICATOR SETTINGS ==========================
-// SuperTrend backbone (ATR period/multiplier). Higher mult = wider bands = fewer, cleaner flips.
-input int            ST_ATR_Period   = 10;
-input double         ST_ATR_Mult     = 3.0;
-
-// Alligator (SMMA on Median price). Periods and shifts control jaw/teeth/lips spacing.
-input int            Jaw_Period      = 13;
-input int            Jaw_Shift       = 8;
-input int            Teeth_Period    = 8;
-input int            Teeth_Shift     = 5;
-input int            Lips_Period     = 5;
-input int            Lips_Shift      = 3;
-
-// AO/Williams %R filters to avoid counter-trend chops
-input double         AO_Min_Strength = 0.0;   // require AO magnitude ≥ this (set >0 to be pickier)
-input bool           Use_WPR_Bias    = true;  // BUY only if WPR > -50; SELL only if WPR < -50
-input bool           Use_WPR_Cross   = false; // Alternative: wait for WPR cross (-80 up for buys / -20 down for sells)
-
-//============================== HOUSEKEEPING ================================
-// Wait this many bars after a fill before allowing another trade (per-bar cooldown)
+// --- System & Housekeeping ---
+input long           Magic            = 250925;
 input int            Cooldown_Bars    = 2;
-
-// Max slippage in points the EA will tolerate on sends/modifies (broker-specific)
 input int            Slippage_Points  = 50;
-
-// --- Closed-trade alerts & scheduled reports
-input bool Send_Closed_Trade_Alerts = true;
-
-input bool Send_Weekly_Report   = true;
-input int  Weekly_Report_DOW    = 0;     // 0=Sun..6=Sat (server time)
-input int  Weekly_Report_Hour   = 21;    // 0..23
-input int  Weekly_Report_Min    = 0;     // 0..59
-
-input bool Send_Monthly_Report  = true;
-input int  Monthly_Report_DOM    = 1;    // day-of-month to send (1..28/29/30/31)
-input int  Monthly_Report_Hour   = 21;   // 0..23
-input int  Monthly_Report_Min    = 0;    // 0..59
+input bool           Send_Closed_Trade_Alerts = true;
+input bool           Send_Weekly_Report = true;
+input int            Weekly_Report_DOW = 0;
+input int            Weekly_Report_Hour = 21;
+input int            Weekly_Report_Min = 0;
+input bool           Send_Monthly_Report = true;
+input int            Monthly_Report_DOM = 1;
+input int            Monthly_Report_Hour = 21;
+input int            Monthly_Report_Min = 0;
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
+input string          TG_BOT_TOKEN         = "7796324180:AAFOrCfRQEj3s7vo_tl359I3eX2Jg00L8G0";
 input string          TG_CHAT_ID           = "394044850";
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
