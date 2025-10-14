@@ -14,7 +14,7 @@ CTrade Trade;
 //============================== Inputs ==============================
 //============================== CORE / GENERAL ==============================
 // Timeframe to EXECUTE the main strategy on (your working chart timeframe)
-input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;
+input ENUM_TIMEFRAMES TF_Trade        = PERIOD_M30;
 
 // Extra higher-timeframe alignment (M15 longs only if H1/H4 are also up, etc.)
 input bool           Use_H1H4_Filter  = true;
@@ -31,7 +31,7 @@ input bool           One_Trade_At_A_Time = false;
 
 //============================== HIGHER-TF BREAKOUT FILTER ===================
 // Filters entries to trade only when the higher timeframe just broke key S/R
-input bool           Use_HTF_Breakout_Filter = false; // master switch
+input bool           Use_HTF_Breakout_Filter = true; // master switch
 input ENUM_TIMEFRAMES TF_HTF_Breakout        = PERIOD_H1;  // HTF to watch (e.g., H4)
 input int            HTF_Breakout_Lookback   = 600;        // bars to scan for pivots
 input double         HTF_Breakout_ATR_Margin = 0.12;       // how far beyond S/R counts as a breakout (in ATRs)
@@ -41,10 +41,10 @@ input int            HTF_Breakout_MaxAgeBars = 3;          // accept only fresh 
 
 //============================== RISK & POSITION SIZING ======================
 // Main trades: percent of account risked per trade. 0 = ignore risk % and use Fixed_Lots
-input double         Risk_Percent       = 1.0;
+input double         Risk_Percent       = 0;
 
 // Main trades: fixed lot if Risk_Percent = 0 (EA auto-clamps to broker min/step/max)
-input double         Fixed_Lots         = 0.10;
+input double         Fixed_Lots         = 0.50;
 
 
 //============================== SL/TP STYLE (MAIN) ==========================
@@ -93,12 +93,12 @@ input double Scalp_TP_Swing_Ext_ATR_Mult = 1.50;
 input double         BE_Activation_TP_Percent = 20.0;
 
 // ATR trailing stop (dynamic SL that follows price). Disable if you want “hold for big R”.
-input bool           Use_ATR_Trailing   = true;
+input bool           Use_ATR_Trailing   = false;
 input int            ATR_Period_Trail   = 10;
 input double         ATR_Trail_Mult     = 3.5;
 
 // “Half-step” trailing for MAIN trades: as price approaches TP, nudge SL forward by half the progress
-input bool           Use_HalfStep_Trailing = false;
+input bool           Use_HalfStep_Trailing = true;
 // Only update that half-step on new bars (true) or allow intrabar updates (false)
 input bool           HalfTrail_NewBar_Only = true;
 
@@ -148,13 +148,13 @@ input double         Breakout_ATR_Margin        = 0.10; // how far beyond swing 
 
 //============================== PENDING ORDERS (MAIN) =======================
 // Safer than market: place BuyStop/SellStop beyond the confirmation bar’s high/low, instead of jumping in at market
-input bool           Use_Pending_Stop_Entries = false;
+input bool           Use_Pending_Stop_Entries = true;
 
 // How far away to set the "Limit" from the current candle's high or low (in ATRs); helps avoid immediate whipsaws
 input double         StopEntry_Offset_ATR     = 0.1;
 
 // Cancel unfilled pending after N bars (prevents stale orders sitting on the book)
-input int            StopEntry_Expiry_Bars    = 4;
+input int            StopEntry_Expiry_Bars    = 6;
 
 
 //============================== MANUAL TRADES MANAGEMENT ====================
@@ -173,7 +173,7 @@ input bool           Manual_Use_Fib_Targets  = true;
 input bool           Use_Scalp_Mode               = true;
 
 // Timeframe the scalp logic reads from (can be M1/M5/M15, etc.)
-input ENUM_TIMEFRAMES TF_Scalp                    = PERIOD_M15;
+input ENUM_TIMEFRAMES TF_Scalp                    = PERIOD_M5;
 
 // If true, block scalps whenever a MAIN EA position is open (keeps book clean)
 input bool           Scalp_Only_When_No_Main      = false;
@@ -197,7 +197,7 @@ input bool           Scalp_Use_Pending_Stop_Entries = true;
 input double         Scalp_StopEntry_Offset_ATR     = 0.02;
 
 // Cancel unfilled scalp pending after N bars
-input int            Scalp_StopEntry_Expiry_Bars    = 3;
+input int            Scalp_StopEntry_Expiry_Bars    = 6;
 input double         Scalp_Market_Entry_ATR_Zone = 1.5;
 
 
@@ -213,7 +213,7 @@ input double         Risk_Percent_Scalp    = 6;   // if >0, overrides and uses t
 
 //============================== SCALP HTF GATE (OPTIONAL) ===================
 // Only allow scalps that align with a higher timeframe breakout (momentum filter)
-input bool           Scalp_Gate_By_HTF     = false;
+input bool           Scalp_Gate_By_HTF     = true;
 input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF    = PERIOD_M15; // e.g., gate M5 scalps with H1 breakouts
 input double         Scalp_Gate_ATR_Margin = 0.10;      // how “clean” the HTF breakout must be (in ATRs)
 
