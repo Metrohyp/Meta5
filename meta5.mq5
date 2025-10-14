@@ -29,7 +29,7 @@ input double         Fixed_Lots       = 0.50;       // Lot size for main trades 
 input bool           Use_Scalp_Mode   = true;     // MASTER SWITCH: Turn the scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // The timeframe the scalp strategy reads from.
 input bool           Scalp_Use_Fixed_Lot = true;  // true = use fixed lot below, false = use risk %
-input double         Fixed_Lots_Scalp = 1.00;      // Lot size for scalp trades.
+input double         Fixed_Lots_Scalp = 0.50;      // Lot size for scalp trades.
 input double         Risk_Percent_Scalp = 6;      // if >0, overrides and uses this absolute % just for scalps
 
 
@@ -41,10 +41,10 @@ input double         Risk_Percent_Scalp = 6;      // if >0, overrides and uses t
 // --- Trailing Stops ---
 // --- Trailing Stops ---
 input bool           Use_ATR_Trailing   = false;    // Dynamic SL that follows price based on volatility.
-input int            ATR_Period_Trail   = 10;       // <-- ADD THIS LINE (ATR period for the trailing stop)
+input int            ATR_Period_Trail   = 10;       // <-- ATR period for the trailing stop
 input double         ATR_Trail_Mult     = 3.5;      // Multiplier for ATR Trail. Higher = wider trail.
 input bool           Use_HalfStep_Trailing = true;  // Alternative trail: SL moves half the distance to TP.
-input bool           HalfTrail_NewBar_Only = true; // <-- ADD THIS LINE (Only update half-step on new bars)
+input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
 input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
@@ -170,7 +170,7 @@ input int            Monthly_Report_Hour = 21;
 input int            Monthly_Report_Min = 0;
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7796324180:AAFOrCfRQEj3s7vo_tl359I3eX2Jg00L8G0";
+input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
 input string          TG_CHAT_ID           = "394044850";
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
