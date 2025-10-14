@@ -39,9 +39,12 @@ input double         Risk_Percent_Scalp = 6;      // if >0, overrides and uses t
 // Controls how trades are managed after they are opened.
 
 // --- Trailing Stops ---
+// --- Trailing Stops ---
 input bool           Use_ATR_Trailing   = false;    // Dynamic SL that follows price based on volatility.
+input int            ATR_Period_Trail   = 10;       // <-- ADD THIS LINE (ATR period for the trailing stop)
 input double         ATR_Trail_Mult     = 3.5;      // Multiplier for ATR Trail. Higher = wider trail.
 input bool           Use_HalfStep_Trailing = true;  // Alternative trail: SL moves half the distance to TP.
+input bool           HalfTrail_NewBar_Only = true; // <-- ADD THIS LINE (Only update half-step on new bars)
 
 // --- Break-Even ---
 input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
