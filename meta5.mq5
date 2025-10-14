@@ -67,7 +67,7 @@ input double         Scalp_RR_Max     = 10.0;     // MAXIMUM R:R for scalp trade
 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
-input bool           Use_ST_Flip_Retest = true;      // Wait for price to pull back to the ST line before entry.
+input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
 input bool           Use_HTF_Breakout_Filter = false;// Require a breakout on a higher timeframe.
 input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;  // Timeframe for the breakout filter.
 input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
