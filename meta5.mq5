@@ -31,7 +31,7 @@ input bool           One_Trade_At_A_Time = false;
 
 //============================== HIGHER-TF BREAKOUT FILTER ===================
 // Filters entries to trade only when the higher timeframe just broke key S/R
-input bool           Use_HTF_Breakout_Filter = true; // master switch
+input bool           Use_HTF_Breakout_Filter = false; // master switch
 input ENUM_TIMEFRAMES TF_HTF_Breakout        = PERIOD_H1;  // HTF to watch (e.g., H4)
 input int            HTF_Breakout_Lookback   = 600;        // bars to scan for pivots
 input double         HTF_Breakout_ATR_Margin = 0.12;       // how far beyond S/R counts as a breakout (in ATRs)
@@ -113,6 +113,9 @@ input int            Min_SL_Points    = 0;
 input bool           Use_ST_as_Stop   = true;
 input double         ST_Stop_Pad_Mult = 0.8;  // 0.10 × ATR pad around ST line
 
+// --- Volatility Circuit Breaker (Emergency Stop) ---
+input bool   Use_Volatility_CircuitBreaker = true;   // Master switch for the emergency brake
+input double CircuitBreaker_ATR_Mult     = 4.0;    // e.g., 4.0 = close all if current candle > 4x ATR
 
 //============================== ENTRY CONFIRMATIONS (MAIN) ==================
 // Require a fresh SuperTrend flip + a retest of the ST line before placing the FIRST entry
@@ -210,7 +213,7 @@ input double         Risk_Percent_Scalp    = 6;   // if >0, overrides and uses t
 
 //============================== SCALP HTF GATE (OPTIONAL) ===================
 // Only allow scalps that align with a higher timeframe breakout (momentum filter)
-input bool           Scalp_Gate_By_HTF     = true;
+input bool           Scalp_Gate_By_HTF     = false;
 input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF    = PERIOD_M15; // e.g., gate M5 scalps with H1 breakouts
 input double         Scalp_Gate_ATR_Margin = 0.10;      // how “clean” the HTF breakout must be (in ATRs)
 
@@ -269,7 +272,7 @@ datetime g_lastWeeklyReportSent  = 0;
 datetime g_lastMonthlyReportSent = 0;
 // ADD THIS NEW GLOBAL VARIABLE
 datetime g_eaStartTime;
-
+bool g_trailingActivated = false; // NEW: Flag to track if BE or Trailing has started
 
 //============================== Utils ===============================
 string tfstr(ENUM_TIMEFRAMES tf)
@@ -672,14 +675,15 @@ bool CalcSuperTrend(ENUM_TIMEFRAMES tf, int atrPeriod, double mult, int shift, d
 }
 
 bool GetSwingsATR(ENUM_TIMEFRAMES tf, int lookback, int atrPeriod,
-double &pHigh, double &pLow, double &atrOut)
+                  double &pHigh, double &pLow, double &atrOut)
 {
-   int bH; double ph; int bL; double pl;
-   if(!RecentSwings(tf, lookback, bH, ph, bL, pl)) return false;
+   // --- WARNINGS FIXED: Removed unused bH and bL variables ---
+   int barHigh, barLow; 
+   double ph, pl;
+   if(!RecentSwings(tf, lookback, barHigh, ph, barLow, pl)) return false;
 
    int hATR = iATR(_Symbol, tf, atrPeriod);
    if(hATR==INVALID_HANDLE) return false;
-
    double a[]; ArraySetAsSeries(a,true);
    if(CopyBuffer(hATR,0,0,3,a)<2){ IndicatorRelease(hATR); return false; }
    atrOut = a[1];
@@ -742,6 +746,63 @@ bool RecentSwings(ENUM_TIMEFRAMES tf, int lookback, int &barHigh, double &priceH
 }
 
 //============================== Position/Risk Management Utilities (Called by Core Logic) =========================
+
+// NEW FUNCTION: Closes all positions on the current symbol in an emergency
+void EmergencyCloseAllPositions(const string reason)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+         {
+            Trade.PositionClose(ticket, 10); // Close with 10 points of slippage tolerance
+         }
+      }
+   }
+   // Send a single alert after trying to close all
+   string alertMsg = StringFormat(
+      "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
+      "📊 <b>Symbol:</b> %s\n"
+      "⚡ <b>Reason:</b> %s\n\n"
+      "<i>All positions have been closed to prevent further loss.</i>",
+      _Symbol, reason
+   );
+   SendTG(alertMsg);
+}
+// NEW FUNCTION: Syncs all open stops to the latest SL, but only if it's an improvement
+void SyncAllStopsSafely(double latestSL)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if((string)PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      long   type    = PositionGetInteger(POSITION_TYPE);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      double modSL = currentSL;
+
+      // Only adjust if the new SL is better than the current one
+      if(type == POSITION_TYPE_BUY && latestSL > currentSL)
+      {
+         modSL = latestSL;
+      }
+      else if(type == POSITION_TYPE_SELL && latestSL < currentSL)
+      {
+         modSL = latestSL;
+      }
+
+      // If a change is needed, modify the position
+      if(modSL != currentSL)
+      {
+         Trade.PositionModify(ticket, modSL, currentTP);
+      }
+   }
+}
+
 
 void TouchUpManualInitial()
 {
@@ -1079,49 +1140,52 @@ void TryScalpEntries()
               : (entry + Scalp_SL_ATR_Mult*atr);
    }
 
-   // --- TP: use RR range first; if not feasible, fallback to Fib 161.8% on scalp swings
-   double tp=0.0; bool tpOk=false;
-   if(Scalp_Use_RR_Range){
-      double chosenR=0.0, dynTP=0.0;
-      tpOk = PickRRTarget(buy, entry, sl, atr, pHs, pLs,
-                          Scalp_RR_Min, Scalp_RR_Max,
-                          Scalp_TP_Max_ATR_Mult, Scalp_TP_Swing_Ext_ATR_Mult,
-                          chosenR, dynTP);
-      if(tpOk) tp = dynTP;
-   }
-// --- TP: use RR range first; if not feasible, FALLBACK TO MULTI-FIB TARGETS
-    if(!tpOk){
-        double leg = MathAbs(pHs - pLs);
-        if (leg <= 0.0) return; // Prevent division by zero / tiny swings
-        
-        // Use a loop to test multiple Fibonacci extension levels: 161.8, 261.8, 3.618
-        double fibLevels[] = { 1.618, 2.618, 3.618 };
-        double bestTP = 0.0;
-        
-        double risk = MathAbs(entry - sl);
-        if (risk <= 0.0) return; // Must have valid SL/Risk
-        
-        for (int i = 0; i < ArraySize(fibLevels); i++)
-        {
-            double currentTP = buy ? (pHs + fibLevels[i] * leg) 
-                                   : (pLs - fibLevels[i] * leg);
-            
-            // Check if this TP meets the minimum required RR
-            double reward = buy ? (currentTP - entry) : (entry - currentTP);
-            double currentRR = (reward > 0.0) ? (reward / risk) : 0.0;
-            
-            if (currentRR >= Scalp_RR_Min)
-            {
-                bestTP = currentTP; // This is the smallest Fib level that meets the minimum RR
-                break; // Use the smallest acceptable level and exit the loop
-            }
-        }
-        
-        tp = bestTP; // Assign the highest acceptable TP found (or 0.0 if none met the minimum RR)
-    }
+// --- TP: Use the TP from any open MAIN trade ---
+double tp = 0.0;
+bool tpOk = false;
 
-// --- NEW CHECK: ENSURE MINIMUM RR IS MET OR REJECT TRADE (Consolidated Final Check) ---
-    // If tp is still 0.0, it means the trade failed both RR Range and Multi-Fib checks.
+// Search for an open main trade to copy its TP
+for(int i = PositionsTotal() - 1; i >= 0; i--)
+{
+   if(PositionSelectByTicket(PositionGetTicket(i)))
+   {
+      if(PositionGetInteger(POSITION_MAGIC) == Magic && 
+         StringFind(PositionGetString(POSITION_COMMENT), "Scalp", 0) < 0)
+      {
+         tp = PositionGetDouble(POSITION_TP);
+         if(tp > 0)
+         {
+            tpOk = true;
+            break; // Found one, stop searching
+         }
+      }
+   }
+}
+
+// If no main trade was found, calculate a theoretical one
+if(!tpOk)
+{
+   // This block calculates what a main trade's TP would be
+   double pH, pL, atrMain;
+   if(GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH, pL, atrMain))
+   {
+      // First, try to use the main RR range
+      if(Use_RR_Range)
+      {
+         double chosenR=0, dynTP=0;
+         tpOk = PickRRTarget(buy, entry, sl, atrMain, pH, pL,
+                              RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
+                              chosenR, dynTP);
+         if(tpOk) tp = dynTP;
+      }
+      // Fallback to main Fib if RR range fails
+      if(!tpOk)
+      {
+         double leg = MathAbs(pH - pL);
+         tp = buy ? (pH + 2.618 * leg) : (pL - 2.618 * leg);
+      }
+   }
+}    // If tp is still 0.0, it means the trade failed both RR Range and Multi-Fib checks.
     if(tp == 0.0)
     {
         string rejectMsg = StringFormat(
@@ -1205,12 +1269,7 @@ void TryScalpEntries()
       tfstr(TF_Scalp),
       DoubleToString(entryPrice, _Digits)
    );
-   
-   // Only send the notification if it's a market entry
-   if (entryType == "Market")
-   {
-      SendTG(signalMsg);
-   }
+   SendTG(signalMsg);
 
    if (Auto_Trade)
    {
@@ -1332,6 +1391,7 @@ void TryEntries()
    {
         string rejectMsg = StringFormat(
             "🚫 <b>TRADE REJECTED - Max Positions</b>\n\n"
+            "⏰ <b>Timeframe:</b> %s\n"
             "📊 <b>Symbol:</b> %s\n"
             "📈 <b>Current Positions:</b> %d\n"
             "📉 <b>Max Allowed:</b> 1\n"
@@ -1697,7 +1757,8 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
 { 
     if(Trade.PositionModify(_Symbol, modSL, modTP))
     {
-        // --- 6. BREAKEVEN ACTIVATED ---
+      g_trailingActivated = true;
+      // --- 6. BREAKEVEN ACTIVATED ---
         double progressPercent = (currentProgress / totalDistToTP) * 100.0;
         string beMsg = StringFormat(
             "💰 <b>BREAKEVEN ACTIVATED</b>\n\n"
@@ -1752,7 +1813,12 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
                SanitizeStops(type, modSL, modTP);
 
                if(modSL>0 && MathAbs(modSL - sl) >= 0.5*_Point)
-                  Trade.PositionModify(_Symbol, modSL, modTP);
+                  {
+   if(Trade.PositionModify(_Symbol, modSL, modTP))
+   {
+      g_trailingActivated = true; // <-- ADD THIS LINE
+   }
+}
             }
 
             lastHalfBarManual = curBar;
@@ -1800,8 +1866,11 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
 
                if(modSL>0 && MathAbs(modSL - sl) >= 0.5*_Point)
                {
-                  Trade.PositionModify(_Symbol, modSL, tp);
-               }
+   if(Trade.PositionModify(_Symbol, modSL, modTP))
+   {
+      g_trailingActivated = true; // <-- ADD THIS LINE
+   }
+}
             }
          }
 
@@ -1827,7 +1896,12 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
                      double modSL=trail, modTP=tp;
                      SanitizeStops(type, modSL, modTP);
                      if(modSL>0 && MathAbs(modSL-sl) >= 0.5*_Point)
-                        Trade.PositionModify(_Symbol, modSL, modTP);
+                        {
+   if(Trade.PositionModify(_Symbol, modSL, modTP))
+   {
+      g_trailingActivated = true; // <-- ADD THIS LINE
+   }
+}
                   }
                }
                else
@@ -1838,7 +1912,12 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
                      double modSL=trail, modTP=tp;
                      SanitizeStops(type, modSL, modTP);
                      if(modSL>0 && (sl==0.0 || MathAbs(modSL-sl) >= 0.5*_Point))
-                        Trade.PositionModify(_Symbol, modSL, modTP);
+                        {
+   if(Trade.PositionModify(_Symbol, modSL, modTP))
+   {
+      g_trailingActivated = true; // <-- ADD THIS LINE
+   }
+}
                   }
                }
             }
@@ -2022,23 +2101,57 @@ void SendPeriodReport(datetime fromTs, datetime toTs, const string label)
 }
 
 // REPLACEMENT FOR OnTick() FUNCTION
+// REPLACEMENT FOR OnTick() FUNCTION
 void OnTick()
 {
-   // --- New Bar Logic ---
+   // --- Part 1: Logic that runs on EVERY tick (Circuit Breaker) ---
+   if(Use_Volatility_CircuitBreaker)
+   {
+      // Cooldown timer to prevent it from firing repeatedly on the same candle
+      static datetime lastBreakerTripTime = 0;
+      if(TimeCurrent() - lastBreakerTripTime < 60) // 60-second cooldown
+      {
+         return; // Still in cooldown, do nothing
+      }
+
+      // Get current candle size and ATR on the main trading timeframe
+      double high0 = iHigh(_Symbol, TF_Trade, 0);
+      double low0  = iLow(_Symbol, TF_Trade, 0);
+      double candleSize = high0 - low0;
+
+      double atr = 0;
+      int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period);
+      if(hATR != INVALID_HANDLE)
+      {
+         double a[];
+         if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0];
+         IndicatorRelease(hATR);
+      }
+
+      // Check if the circuit breaker condition is met
+      if(atr > 0 && candleSize > (atr * CircuitBreaker_ATR_Mult))
+      {
+         if(PositionsTotal() > 0) // Only fire if there are open positions
+         {
+            EmergencyCloseAllPositions("Extreme candle volatility detected.");
+            lastBreakerTripTime = TimeCurrent(); // Start the cooldown
+            return; // Stop further processing on this tick
+         }
+      }
+   }
+
+   // --- Part 2: Your original logic that runs ONCE per new bar ---
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(_Symbol, TF_Trade, 0);
 
-   // This entire block will now only execute ONCE on the first tick of a new bar.
    if(currentBarTime != lastBarTime)
    {
-      // Update the last bar time to prevent this block from running again until the next bar.
       lastBarTime = currentBarTime;
 
       // Check for main strategy entries.
       TryEntries();
-
-      // Check for scalp entries (only runs if a new scalp timeframe bar has also formed).
-      // We check this inside the main new bar block for efficiency.
+      
+      // Check for scalp entries
       static datetime lastScalpBarTime = 0;
       if(Use_Scalp_Mode)
       {
@@ -2050,11 +2163,8 @@ void OnTick()
           }
       }
 
-      // Check and set initial SL/TP for any manual trades.
+      // Manage all other per-bar tasks
       TouchUpManualInitial();
-
-      // Manage Breakeven and Trailing Stops for all open positions.
-      // Because this is inside the new bar check, it will only run once per bar.
       ManageOpenPositions();
    }
 }
@@ -2111,115 +2221,142 @@ void OnTimer()
    }
 }
 
+
 // REPLACEMENT FOR OnTradeTransaction() FUNCTION
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest      &req,
                         const MqlTradeResult       &res)
 {
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
-   ulong deal = (ulong)trans.deal;
-   if(deal==0) return;
+   // --- Check if the event is a completed trade or a deleted order ---
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD && trans.type != TRADE_TRANSACTION_ORDER_DELETE) return;
 
-   // We need access to the deal in history
-   HistorySelect(0, TimeCurrent());
-
-   long   entryType = (long)HistoryDealGetInteger(deal, DEAL_ENTRY);
-   string sym       = (string)HistoryDealGetString (deal, DEAL_SYMBOL);
-   if(sym != _Symbol) return;
-
-   // --- POSITION OPENED (FILL) ---
-   if(entryType == DEAL_ENTRY_IN)
+   // --- Event Type 1: A DEAL WAS MADE (POSITION OPENED OR CLOSED) ---
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
-      long   mg      = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-      if(mg != Magic) return; // Only this EA's trades
+      ulong deal = (ulong)trans.deal;
+      if(deal == 0) return;
 
-      // Get all details from the confirmed deal
-      long   dType   = (long)HistoryDealGetInteger(deal, DEAL_TYPE); // buy/sell
-      string typeStr = (dType==DEAL_TYPE_BUY) ? "BUY" : "SELL";
-      string typeEmoji = (dType==DEAL_TYPE_BUY) ? "📈" : "📉";
-      double entry   = HistoryDealGetDouble(deal, DEAL_PRICE);
-      double lots    = HistoryDealGetDouble(deal, DEAL_VOLUME);
-      string cmt     = (string)HistoryDealGetString(deal, DEAL_COMMENT);
-      bool   isScalp = (StringFind(cmt,"Scalp",0) >= 0);
-      string strat   = isScalp ? "Scalp Strategy" : "Main Strategy";
-      
-      // SL/TP are set on the position, not the deal, so we retrieve them from the position
-      double sl=0.0, tp=0.0;
-      ulong posID = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
-      if(PositionSelectByTicket(posID))
+      HistorySelect(0, TimeCurrent());
+      long   entryType = (long)HistoryDealGetInteger(deal, DEAL_ENTRY);
+      string sym       = (string)HistoryDealGetString (deal, DEAL_SYMBOL);
+      if(sym != _Symbol) return;
+
+      // --- A) POSITION OPENED (FILL) ---
+      if(entryType == DEAL_ENTRY_IN)
       {
-         sl = PositionGetDouble(POSITION_SL);
-         tp = PositionGetDouble(POSITION_TP);
-      }
+         long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
+         if(mg != Magic) return; // Only this EA's trades
 
-      // --- 4. TRADE EXECUTION CONFIRMATION
-      string execMsg = StringFormat(
-         "✅ <b>TRADE EXECUTED</b>\n\n"
-         "📊 <b>Symbol:</b> %s\n"
-         "%s <b>Type:</b> %s\n"
-         "💰 <b>Entry:</b> %s\n"
-         "📦 <b>Lots:</b> %.2f\n"
-         "🛑 <b>SL:</b> %s\n"
-         "🎯 <b>TP:</b> %s\n"
-         "⚡ <b>Strategy:</b> %s",
-         _Symbol,
-         typeEmoji, typeStr,
-         DoubleToString(entry, _Digits),
-         lots,
-         DoubleToString(sl, _Digits),
-         DoubleToString(tp, _Digits),
-         strat
-      );
-      SendTG(execMsg);
-      return;
-   }
+         long   dType   = (long)HistoryDealGetInteger(deal, DEAL_TYPE);
+         string typeStr = (dType==DEAL_TYPE_BUY) ? "BUY" : "SELL";
+         string typeEmoji = (dType==DEAL_TYPE_BUY) ? "📈" : "📉";
+         double entry   = HistoryDealGetDouble(deal, DEAL_PRICE);
+         double lots    = HistoryDealGetDouble(deal, DEAL_VOLUME);
+         string cmt     = (string)HistoryDealGetString(deal, DEAL_COMMENT);
+         bool   isScalp = (StringFind(cmt,"Scalp",0) >= 0);
+         string strat   = isScalp ? "Scalp Strategy" : "Main Strategy";
+         
+         // --- ERROR FIX: Declaring these variables once for this block ---
+         double sl=0.0, tp=0.0;
+         ulong posID = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         if(PositionSelectByTicket(posID))
+         {
+            sl = PositionGetDouble(POSITION_SL);
+            tp = PositionGetDouble(POSITION_TP);
+         }
+         
+         // If a new scalp trade opened AND trailing has been activated, sync all stops
+         if(isScalp && g_trailingActivated)
+         {
+            SyncAllStopsSafely(sl);
+         }
 
-   // --- POSITION CLOSED (WIN/LOSS) ---
-   if(Send_Closed_Trade_Alerts && (entryType==DEAL_ENTRY_OUT || entryType==DEAL_ENTRY_OUT_BY))
-   {
-      long    mg   = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-      if(mg != Magic) return;
-
-      double  P    = HistoryDealGetDouble (deal, DEAL_PROFIT);
-      double  F    = HistoryDealGetDouble (deal, DEAL_FEE);
-      double  C    = HistoryDealGetDouble (deal, DEAL_COMMISSION);
-      double  S    = HistoryDealGetDouble (deal, DEAL_SWAP);
-      double  net  = P + F + C + S;
-      string  cmt  = (string)HistoryDealGetString(deal, DEAL_COMMENT);
-
-      // Check for our special "Trend Flip" comment
-      if (StringFind(cmt, "V25 Trend Flip", 0) >= 0)
-      {
-         // --- 7. POSITION CLOSED - TREND FLIP
-         string closeMsg = StringFormat(
-            "🔄 <b>POSITION CLOSED - Trend Flip</b>\n\n"
+         string execMsg = StringFormat(
+            "✅ <b>TRADE EXECUTED</b>\n\n"
             "📊 <b>Symbol:</b> %s\n"
-            "💰 <b>Profit/Loss:</b> %s%.2f\n"
-            "⚡ <b>Reason:</b> SuperTrend direction changed",
-            _Symbol,
-            net >= 0 ? "+" : "",
-            net
+            "%s <b>Type:</b> %s\n"
+            "💰 <b>Entry:</b> %s\n"
+            "📦 <b>Lots:</b> %.2f\n"
+            "🛑 <b>SL:</b> %s\n"
+            "🎯 <b>TP:</b> %s\n"
+            "⚡ <b>Strategy:</b> %s",
+            _Symbol, typeEmoji, typeStr, DoubleToString(entry, _Digits),
+            lots, DoubleToString(sl, _Digits), DoubleToString(tp, _Digits), strat
          );
-         SendTG(closeMsg);
+         SendTG(execMsg);
+         return;
       }
-      else
+
+      // --- B) POSITION CLOSED (WIN/LOSS) ---
+      if(Send_Closed_Trade_Alerts && (entryType==DEAL_ENTRY_OUT || entryType==DEAL_ENTRY_OUT_BY))
       {
-          // Generic close message for TP/SL/Manual
-          string reason = "Closed by TP/SL";
-          if (cmt == "") reason = "Closed Manually"; // Example
-          
-          string closeMsg = StringFormat(
+         long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
+         if(mg != Magic) return;
+
+         double P    = HistoryDealGetDouble (deal, DEAL_PROFIT);
+         double F    = HistoryDealGetDouble (deal, DEAL_FEE);
+         double C    = HistoryDealGetDouble (deal, DEAL_COMMISSION);
+         double S    = HistoryDealGetDouble (deal, DEAL_SWAP);
+         double net  = P + F + C + S;
+         string cmt  = (string)HistoryDealGetString(deal, DEAL_COMMENT);
+         
+         // --- ERROR FIX: Declare entryPrice here so it's available for the alert message ---
+         double entryPrice = 0.0;
+         ulong posID_closed = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         if (posID_closed > 0)
+         {
+             for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
+             {
+                 ulong d_ticket = HistoryDealGetTicket(i);
+                 if (HistoryDealGetInteger(d_ticket, DEAL_POSITION_ID) == posID_closed &&
+                     HistoryDealGetInteger(d_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+                 {
+                     entryPrice = HistoryDealGetDouble(d_ticket, DEAL_PRICE);
+                     break; 
+                 }
+             }
+         }
+
+         string reason = "Closed by TP/SL";
+         if (cmt == "") reason = "Closed Manually";
+         
+         string closeMsg = StringFormat(
             "%s <b>POSITION CLOSED</b>\n\n"
             "📊 <b>Symbol:</b> %s\n"
+            "💰 <b>Entry:</b> %s\n"
             "💰 <b>Profit/Loss:</b> %s%.2f\n"
             "⚡ <b>Reason:</b> %s",
             net >= 0 ? "✅" : "❌",
             _Symbol,
-            net >= 0 ? "+" : "",
-            net,
+            DoubleToString(entryPrice, _Digits),
+            net >= 0 ? "+" : "", net,
             reason
          );
          SendTG(closeMsg);
+      }
+   }
+   // --- Event Type 2: A PENDING ORDER WAS REMOVED ---
+   else if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
+   {
+      // --- ERROR FIX: Check req.magic instead of trans.magic ---
+      if(req.magic == Magic)
+      {
+         if(trans.order_type == ORDER_TYPE_BUY_LIMIT || trans.order_type == ORDER_TYPE_SELL_LIMIT)
+         {
+            string orderTypeStr = (trans.order_type == ORDER_TYPE_BUY_LIMIT) ? "Buy Limit" : "Sell Limit";
+            
+            string removeMsg = StringFormat(
+               "🔵 <b>PENDING ORDER REMOVED</b>\n\n"
+               "📊 <b>Symbol:</b> %s\n"
+               "🔵 <b>Type:</b> %s\n"
+               "💰 <b>Price:</b> %s\n"
+               "⚡ <b>Reason:</b> Order expired or was canceled.",
+               _Symbol,
+               orderTypeStr,
+               DoubleToString(trans.price, _Digits)
+            );
+            SendTG(removeMsg);
+         }
       }
    }
 }
