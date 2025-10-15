@@ -190,6 +190,7 @@ datetime g_lastMonthlyReportSent = 0;
 // ADD THIS NEW GLOBAL VARIABLE
 datetime g_eaStartTime;
 bool g_trailingActivated = false; // NEW: Flag to track if BE or Trailing has started
+bool g_breakoutConfirmed = false; // NEW: Flag to track if a clean breakout is confirmed for the current trend
 
 //============================== Utils ===============================
 string tfstr(ENUM_TIMEFRAMES tf)
@@ -1096,20 +1097,23 @@ void TryScalpEntries()
 
    if(!(buy || sell)) return;
 
-// <<< --- ADD THIS NEW BLOCK START --- >>>
-   // Apply the new Breakout Confirmation Filter if enabled
-   if(Use_Breakout_Confirmation)
+// --- Apply Breakout Confirmation ONLY for the FIRST trade after a flip ---
+   if(Use_Breakout_Confirmation && !g_breakoutConfirmed)
    {
-      if(buy)
+      if(buy && IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp))
       {
-         buy = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp);
+         g_breakoutConfirmed = true;
       }
-      if(sell)
+      else if(sell && IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp))
       {
-         sell = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp);
+         g_breakoutConfirmed = true;
+      }
+      else
+      {
+         buy = false;
+         sell = false;
       }
    }
-   // <<< --- ADD THIS NEW BLOCK END --- >>>
 
    if(!(buy || sell)) return; // Re-check conditions after the new filter
    
@@ -1335,14 +1339,14 @@ void TryEntries()
       wSellOK = (wPrev > -20.0 && w < -20.0);
    }
 
-   // --- Detect fresh ST flip and reset staging
-   if(Use_ST_Flip_Retest){
-      if(dirM15!=0 && dirM15!=prevDir_ST){
-         flipBar    = iTime(_Symbol, TF_Trade, 1); // last closed bar
-         stageCount = 0;
-      }
-      prevDir_ST = dirM15;
+// --- Detect fresh ST flip and reset all state variables ---
+   if(dirM15 != 0 && dirM15 != prevDir_ST)
+   {
+      flipBar             = iTime(_Symbol, TF_Trade, 1);
+      stageCount          = 0;
+      g_breakoutConfirmed = false; // Reset the breakout confirmation flag on a new trend flip
    }
+   prevDir_ST = dirM15;
 
    // --- Wait N bars after flip (anti-early)
    bool flipWaitOK = true;
@@ -1358,16 +1362,22 @@ void TryEntries()
    bool buyCond  = (dirM15>0 && ag>0 && aoBuyOK && wBuyOK && hOK && c>stLineM15);
    bool sellCond = (dirM15<0 && ag<0 && aoSellOK && wSellOK && hOK && c<stLineM15);
 
-   // --- Apply the new Breakout Confirmation Filter if enabled ---
-   if(Use_Breakout_Confirmation)
+// --- Apply Breakout Confirmation ONLY for the FIRST trade after a flip ---
+   if(Use_Breakout_Confirmation && !g_breakoutConfirmed)
    {
-      if(buyCond)
+      if(buyCond && IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade))
       {
-         buyCond = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade);
+         g_breakoutConfirmed = true; // Confirmation successful, lock it in for this trend.
       }
-      if(sellCond)
+      else if(sellCond && IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade))
       {
-         sellCond = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade);
+         g_breakoutConfirmed = true; // Confirmation successful, lock it in for this trend.
+      }
+      else
+      {
+         // If breakout is not clean for the first trade, invalidate both signals for this bar.
+         buyCond = false;
+         sellCond = false;
       }
    }
 
@@ -1397,9 +1407,21 @@ void TryEntries()
       bool htfBuyOK  = (cHTF >= (pH_htf + mHTF));
       bool htfSellOK = (cHTF <= (pL_htf - mHTF));
 
-      buyCond  = buyCond  && htfBuyOK;
-      sellCond = sellCond && htfSellOK;
-      if(!buyCond && !sellCond) return;  // gate failed
+     // Apply the filter as a directional guide, not a hard stop
+     if(htfBuyOK && !htfSellOK) // If there is a clean HTF buy signal
+     {
+        sellCond = false; // Only allow buys
+     }
+     else if(htfSellOK && !htfBuyOK) // If there is a clean HTF sell signal
+     {
+        buyCond = false; // Only allow sells
+     }
+     else // If there is no clean signal or signals in both directions (choppy)
+     {
+        buyCond = false;  // Do not trade
+        sellCond = false; // Do not trade
+     }
+
    }
    // ======================================================================
 
