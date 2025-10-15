@@ -1872,7 +1872,7 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
             double progressPts = (type==POSITION_TYPE_BUY) ? (cur - entry)/_Point
                                                            : (entry - cur)/_Point;
 
-            if(targetPts>0 && progressPts>0)
+            if(progressPts > 0)
             {
                double ratio   = MathMin(1.0, progressPts/targetPts);
                double desired = 0.0;
@@ -1921,11 +1921,14 @@ if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
             if(tp>0 && D>0.0)
             {
                // Progress to TP in [0..1]
-               double progress = (type==POSITION_TYPE_BUY)
-                                 ? (cur - entry) / D
-                                 : (entry - cur) / D;
-               if(progress < 0.0) progress = 0.0;
-               if(progress > 1.0) progress = 1.0;
+           double progress = (type==POSITION_TYPE_BUY)
+                             ? (cur - entry) / D
+                             : (entry - cur) / D;
+
+           // <<< FIX: Only run trailing logic if the trade is actually in profit. >>>
+           if(progress <= 0.0) continue; // If not in profit, skip this position and move to the next.
+
+           if(progress > 1.0) progress = 1.0;
 
                // Target SL = entry +/- 0.5 * progress * distance-to-TP
                double targetSL = (type==POSITION_TYPE_BUY)
