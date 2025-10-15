@@ -30,8 +30,7 @@ input bool           Use_Scalp_Mode   = true;     // MASTER SWITCH: Turn the sca
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // The timeframe the scalp strategy reads from.
 input bool           Scalp_Use_Fixed_Lot = true;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.50;      // Lot size for scalp trades.
-input double         Risk_Percent_Scalp = 6;      // if >0, overrides and uses this absolute % just for scalps
-
+input double         Risk_Percent_Scalp = 20;      // if >0, overrides and uses this absolute % just for scalps
 
 //================================================================================
 //                 --- TRADE MANAGEMENT & EXITS ---
@@ -47,7 +46,7 @@ input bool           Use_HalfStep_Trailing = true;  // Alternative trail: SL mov
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
-input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Activation_TP_Percent = 30.0; // Move SL to BE when trade is X% of the way to TP.
 
 // --- Emergency Exit ---
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -71,7 +70,7 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
-input bool           Use_ST_Flip_Retest = true;      // Wait for price to pull back to the ST line before entry.
+input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
 input bool           Use_HTF_Breakout_Filter = false;// Require a breakout on a higher timeframe.
 input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;  // Timeframe for the breakout filter.
 input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
@@ -104,20 +103,20 @@ input bool           Use_WPR_Bias     = true;
 input bool           Use_WPR_Cross    = false;
 
 // --- Pending Order Mechanics ---
-input bool           Use_Pending_Stop_Entries = true;
-input double         StopEntry_Offset_ATR = 0.1;
-input int            StopEntry_Expiry_Bars = 6;
-input bool           Scalp_Use_Pending_Stop_Entries = true;
+input bool           Use_Pending_Stop_Entries = false;
+input double         StopEntry_Offset_ATR = 0.2;
+input int            StopEntry_Expiry_Bars = 8;
+input bool           Scalp_Use_Pending_Stop_Entries = false;
 input double         Scalp_StopEntry_Offset_ATR = 0.02;
-input int            Scalp_StopEntry_Expiry_Bars = 6;
-input double         Scalp_Market_Entry_ATR_Zone = 1.5;
+input int            Scalp_StopEntry_Expiry_Bars = 8;
+input double         Scalp_Market_Entry_ATR_Zone = 3;
 
 // --- Manual Trade Management ---
 input bool           ApplyToManualTrades = true;
 input bool           Manual_Set_Initial_SLTP = true;
 input bool           Manual_Use_Fib_Targets = true;
 input bool           Manual_Use_RR_Range = true;
-input double         Manual_RR_Min      = 3.0;
+input double         Manual_RR_Min      = 1.5;
 input double         Manual_RR_Max      = 10.0;
 input double         Manual_TP_Max_ATR_Mult = 6.0;
 input double         Manual_TP_Swing_Ext_ATR_Mult = 1.50;
@@ -127,11 +126,11 @@ input bool           Use_Fib_Targets    = true;
 input bool           Use_RR_Range       = true;
 input bool           Scalp_Use_RR_Range = true;
 input bool           Use_Dynamic_SL_ATR = true;
-input double         ATR_SL_Buffer_Mult = 0.1;
-input double         SL_ATR_Min         = 2;
+input double         ATR_SL_Buffer_Mult = 0.2;
+input double         SL_ATR_Min         = 2.5;
 input double         SL_ATR_Max         = 6.0;
 input double         SL_Swing_Pad_ATR   = 0.60;
-input double         Min_SL_ATR_Mult    = 0.8;
+input double         Min_SL_ATR_Mult    = 1;
 input int            Min_SL_Points      = 0;
 input bool           Use_ST_as_Stop     = true;
 input double         ST_Stop_Pad_Mult   = 0.8;
@@ -140,7 +139,7 @@ input double         TP_Swing_Ext_ATR_Mult = 1.50;
 input double         Scalp_TP_Max_ATR_Mult = 6.0;
 input double         Scalp_TP_Swing_Ext_ATR_Mult = 1.50;
 input int            Scalp_ATR_Period   = 10;
-input double         Scalp_SL_ATR_Mult  = 0.5;
+input double         Scalp_SL_ATR_Mult  = 1;
 input bool           Protect_Scalp_SLTP = false;
 input bool           Adjust_All_Exclude_Scalps = false;
 
@@ -149,14 +148,14 @@ input int            HTF_Breakout_Lookback = 600;
 input double         HTF_Breakout_ATR_Margin = 0.25;
 input int            HTF_Breakout_Mode  = 0;
 input int            HTF_Breakout_MaxAgeBars = 3;
-input double         Retest_ATR_Tolerance = 0.15;
-input double         AddEntry_Trigger_Ratio = 0.85;
+input double         Retest_ATR_Tolerance = 0.25;
+input double         AddEntry_Trigger_Ratio = 1;
 input bool           Adjust_All_To_Latest = true;
 input int            Min_Bars_After_Flip = 1;
-input double         Confirm_Close_Dist_ATR = 0.10;
+input double         Confirm_Close_Dist_ATR = 0.20;
 input bool           Require_Retrace_Or_Breakout = false;
-input double         Breakout_ATR_Margin = 0.10;
-input double         Scalp_Gate_ATR_Margin = 0.10;
+input double         Breakout_ATR_Margin = 0.20;
+input double         Scalp_Gate_ATR_Margin = 0.20;
 input double         Scalp_Risk_Mult    = 2.0;
 
 // --- System & Housekeeping ---
