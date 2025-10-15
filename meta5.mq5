@@ -65,6 +65,10 @@ input double         Scalp_RR_Max     = 10.0;     // MAXIMUM R:R for scalp trade
 //================================================================================
 // These settings make the EA more selective about which trades to take.
 
+// --- NEW: Breakout Confirmation Filter ---
+input bool           Use_Breakout_Confirmation   = true; // Require a sequence of candles to confirm a breakout.
+input int            Required_Confirmation_Candles = 2;  // Number of follow-up candles required (2 or 3).
+
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
@@ -94,7 +98,7 @@ input int            Teeth_Period     = 8;
 input int            Teeth_Shift      = 5;
 input int            Lips_Period      = 5;
 input int            Lips_Shift       = 3;
-input double         AO_Min_Strength  = 0.0;
+input double         AO_Min_Strength  = 3.0;
 input double         AO_Scalp_Min_Strength = 3;
 input bool           Use_WPR_Bias     = true;
 input bool           Use_WPR_Cross    = false;
@@ -142,7 +146,7 @@ input bool           Adjust_All_Exclude_Scalps = false;
 
 // --- Detailed Filter Mechanics ---
 input int            HTF_Breakout_Lookback = 600;
-input double         HTF_Breakout_ATR_Margin = 0.12;
+input double         HTF_Breakout_ATR_Margin = 0.25;
 input int            HTF_Breakout_Mode  = 0;
 input int            HTF_Breakout_MaxAgeBars = 3;
 input double         Retest_ATR_Tolerance = 0.15;
@@ -170,7 +174,7 @@ input int            Monthly_Report_Hour = 21;
 input int            Monthly_Report_Min = 0;
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
+input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
 input string          TG_CHAT_ID           = "394044850";
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
@@ -251,6 +255,76 @@ string URLEncode(const string s)
    return out;
 }
 //======================== Indicator Helpers =========================
+
+//+------------------------------------------------------------------+
+//| Checks for a clean breakout candle followed by confirmation candles. |
+//+------------------------------------------------------------------+
+bool IsCleanBreakout(long tradeType, int numConfirmCandles, ENUM_TIMEFRAMES tf)
+{
+   // Total number of candles in our sequence (1 breakout + N confirmation)
+   int sequenceLength = 1 + numConfirmCandles;
+
+   // Ensure we have enough historical data to check the sequence
+   if(Bars(_Symbol, tf) < sequenceLength + 5) return false;
+
+   // --- Step 1: Identify the Breakout Candle and the line it broke ---
+   int breakoutCandleIndex = sequenceLength; // e.g., bar[3] if numConfirmCandles = 2
+   int barBeforeBreakoutIndex = breakoutCandleIndex + 1; // e.g., bar[4]
+
+   // Get the SuperTrend value from the candle BEFORE the breakout
+   double stLineToBreak = 0;
+   int dirBeforeBreakout = 0;
+   if(!CalcSuperTrend(tf, ST_ATR_Period, ST_ATR_Mult, barBeforeBreakoutIndex, stLineToBreak, dirBeforeBreakout))
+   {
+      return false; // Cannot calculate ST, cannot confirm
+   }
+
+   // Get the Open and Close of the breakout candle
+   double breakoutOpen  = iOpen(_Symbol, tf, breakoutCandleIndex);
+   double breakoutClose = iClose(_Symbol, tf, breakoutCandleIndex);
+
+   // --- Step 2: Verify the breakout candle crossed the SuperTrend line ---
+   bool breakoutCandleIsValid = false;
+   if(tradeType == POSITION_TYPE_BUY)
+   {
+      // For a BUY, the trend before must be DOWN, and the candle must cross UP
+      if(dirBeforeBreakout == -1 && breakoutOpen < stLineToBreak && breakoutClose > stLineToBreak)
+      {
+         breakoutCandleIsValid = true;
+      }
+   }
+   else // POSITION_TYPE_SELL
+   {
+      // For a SELL, the trend before must be UP, and the candle must cross DOWN
+      if(dirBeforeBreakout == +1 && breakoutOpen > stLineToBreak && breakoutClose < stLineToBreak)
+      {
+         breakoutCandleIsValid = true;
+      }
+   }
+
+   if(!breakoutCandleIsValid) return false; // The first candle didn't perform a clean break.
+
+   // --- Step 3: Verify all confirmation candles are in the correct direction ---
+   for(int i = numConfirmCandles; i >= 1; i--)
+   {
+      int confirmCandleIndex = i; // e.g., bar[2], then bar[1]
+      double confirmOpen  = iOpen(_Symbol, tf, confirmCandleIndex);
+      double confirmClose = iClose(_Symbol, tf, confirmCandleIndex);
+
+      if(tradeType == POSITION_TYPE_BUY)
+      {
+         if(confirmClose <= confirmOpen) return false; // Must be a bullish candle
+      }
+      else // POSITION_TYPE_SELL
+      {
+         if(confirmClose >= confirmOpen) return false; // Must be a bearish candle
+      }
+   }
+
+   // If we passed all checks, it's a valid, clean breakout sequence
+   return true;
+}
+
 // ---- Dynamic SL: pick SL at [min..max] ATRs from entry, and beyond swing by pad
 bool PickSL_DynamicATR(bool isBuy,
                        double entry, double atr,
@@ -1022,6 +1096,23 @@ void TryScalpEntries()
 
    if(!(buy || sell)) return;
 
+// <<< --- ADD THIS NEW BLOCK START --- >>>
+   // Apply the new Breakout Confirmation Filter if enabled
+   if(Use_Breakout_Confirmation)
+   {
+      if(buy)
+      {
+         buy = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp);
+      }
+      if(sell)
+      {
+         sell = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp);
+      }
+   }
+   // <<< --- ADD THIS NEW BLOCK END --- >>>
+
+   if(!(buy || sell)) return; // Re-check conditions after the new filter
+   
    // ---- ATR on scalp TF
    int hATR = iATR(_Symbol, TF_Scalp, Scalp_ATR_Period);
    double atr=0.0;
@@ -1263,9 +1354,22 @@ void TryEntries()
    bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
    bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength);
 
-   // Raw signal conditions (before HTF gate)
+// Raw signal conditions
    bool buyCond  = (dirM15>0 && ag>0 && aoBuyOK && wBuyOK && hOK && c>stLineM15);
    bool sellCond = (dirM15<0 && ag<0 && aoSellOK && wSellOK && hOK && c<stLineM15);
+
+   // --- Apply the new Breakout Confirmation Filter if enabled ---
+   if(Use_Breakout_Confirmation)
+   {
+      if(buyCond)
+      {
+         buyCond = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade);
+      }
+      if(sellCond)
+      {
+         sellCond = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade);
+      }
+   }
 
    // ======================= HTF BREAKOUT GATE (UPDATED) ===================
    {
