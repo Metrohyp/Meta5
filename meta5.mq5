@@ -54,9 +54,9 @@ input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake fo
 input double         CircuitBreaker_ATR_Mult = 4.5;    // Closes all if a candle is > X times the average size.
 
 // --- Profit Targets (Risk/Reward) ---
-input double         RR_Min           = 3.0;      // MINIMUM R:R for main trades.
+input double         RR_Min           = 2.0;      // MINIMUM R:R for main trades.
 input double         RR_Max           = 10.0;     // MAXIMUM R:R for main trades.
-input double         Scalp_RR_Min     = 3.0;      // MINIMUM R:R for scalp trades.
+input double         Scalp_RR_Min     = 2.0;      // MINIMUM R:R for scalp trades.
 input double         Scalp_RR_Max     = 10.0;     // MAXIMUM R:R for scalp trades.
 
 
@@ -71,15 +71,15 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
-input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
-input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;  // Timeframe for the breakout filter.
+input bool           Use_ST_Flip_Retest = true;      // Wait for price to pull back to the ST line before entry.
+input bool           Use_HTF_Breakout_Filter = false;// Require a breakout on a higher timeframe.
+input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;  // Timeframe for the breakout filter.
 input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
-input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
-input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_M15; // Timeframe for the scalp alignment filter.
+input bool           Scalp_Gate_By_HTF  = false;     // Require scalp trades to align with HTF breakout.
+input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_H1; // Timeframe for the scalp alignment filter.
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
 input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
 
@@ -1045,6 +1045,16 @@ void TryScalpEntries()
 {
    if(!Use_Scalp_Mode) return;
 
+      // <<< --- ADD THIS NEW BLOCK START --- >>>
+   // This logic requires the main SuperTrend direction, so we must calculate it here.
+   double stLine_ignored = 0; // We only need the direction.
+   int    dirM15 = 0;
+   if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, stLine_ignored, dirM15))
+   {
+      return; // Can't get ST data, so we stop.
+   }
+   // <<< --- ADD THIS NEW BLOCK END --- >>>
+
    // Respect "only when no main trade" using your existing Magic-based count
    if(Scalp_Only_When_No_Main && CountOpen()>0) return;
 
@@ -1097,19 +1107,28 @@ void TryScalpEntries()
 
    if(!(buy || sell)) return;
 
-// --- Apply Breakout Confirmation ONLY for the FIRST trade after a flip ---
-   if(Use_Breakout_Confirmation && !g_breakoutConfirmed)
+// --- Smart Trend Confirmation Logic for Scalp ---
+   bool isTrendFlip = (dirM15 != 0 && dirM15 != prevDir_ST);
+
+   if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
    {
-      if(buy && IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp))
+      bool isCleanBreakoutFound = false;
+      if(buy)
       {
-         g_breakoutConfirmed = true;
+         isCleanBreakoutFound = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp);
       }
-      else if(sell && IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp))
+      else if(sell)
       {
-         g_breakoutConfirmed = true;
+         isCleanBreakoutFound = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp);
+      }
+
+      if(isCleanBreakoutFound)
+      {
+         g_breakoutConfirmed = true; // Breakout is real, lock it in for this trend.
       }
       else
       {
+         // FAKEOUT DETECTED. Invalidate the signal for this bar.
          buy = false;
          sell = false;
       }
@@ -1339,7 +1358,7 @@ void TryEntries()
       wSellOK = (wPrev > -20.0 && w < -20.0);
    }
 
-// --- Detect fresh ST flip and reset all state variables ---
+ // --- Detect fresh ST flip and reset all state variables ---
    if(dirM15 != 0 && dirM15 != prevDir_ST)
    {
       flipBar             = iTime(_Symbol, TF_Trade, 1);
@@ -1358,26 +1377,45 @@ void TryEntries()
    bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
    bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength);
 
-// Raw signal conditions
+ // Raw signal conditions
    bool buyCond  = (dirM15>0 && ag>0 && aoBuyOK && wBuyOK && hOK && c>stLineM15);
    bool sellCond = (dirM15<0 && ag<0 && aoSellOK && wSellOK && hOK && c<stLineM15);
 
-// --- Apply Breakout Confirmation ONLY for the FIRST trade after a flip ---
-   if(Use_Breakout_Confirmation && !g_breakoutConfirmed)
+// --- Smart Trend Confirmation Logic for Main ---
+   bool isTrendFlip = (dirM15 != 0 && dirM15 != prevDir_ST);
+
+   if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
    {
-      if(buyCond && IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade))
+      bool isCleanBreakoutFound = false;
+      if(buyCond)
       {
-         g_breakoutConfirmed = true; // Confirmation successful, lock it in for this trend.
+         isCleanBreakoutFound = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade);
       }
-      else if(sellCond && IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade))
+      else if(sellCond)
       {
-         g_breakoutConfirmed = true; // Confirmation successful, lock it in for this trend.
+         isCleanBreakoutFound = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade);
+      }
+
+      if(isCleanBreakoutFound)
+      {
+         // --- BREAKOUT CONFIRMED ---
+         // The new trend is real. Lock it in and invalidate any trades against it.
+         g_breakoutConfirmed = true;
+         if(dirM15 > 0) sellCond = false; // Only allow buys now
+         if(dirM15 < 0) buyCond = false;  // Only allow sells now
       }
       else
       {
-         // If breakout is not clean for the first trade, invalidate both signals for this bar.
-         buyCond = false;
-         sellCond = false;
+         // --- FAKEOUT DETECTED ---
+         // The breakout failed. Invalidate the signal for the fake new trend.
+         if(prevDir_ST > 0) // The old trend was UP, so this was a fake sell signal.
+         {
+            sellCond = false; // Block the fake sell
+         }
+         else // The old trend was DOWN, so this was a fake buy signal.
+         {
+            buyCond = false; // Block the fake buy
+         }
       }
    }
 
