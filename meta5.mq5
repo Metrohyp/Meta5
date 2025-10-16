@@ -37,11 +37,13 @@ input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below
 input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
 input double         Risk_Percent_Scalp = 2;      // if >0, overrides and uses this absolute % just for scalps
 
+// --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
-input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;  // breakout filter Timeframe.
+input int            HTF_Filter_Mode = 2;              // 0=Trend Align, 1=Breakout, 2=BOTH (Trend AND Breakout)
+input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;    // Timeframe for the filter.
 
 input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
-input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_M15; // scalp alignment filter Timeframe.
+input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_H1; // scalp alignment filter Timeframe.
 
 input bool           Cancel_Pending_On_Flip = true; // Cancel pending orders if SuperTrend flips.
 input bool           Use_Pending_Stop_Entries = true;
@@ -1221,28 +1223,6 @@ void TryScalpEntries()
     double rp = (Risk_Percent_Scalp > 0.0 ? Risk_Percent_Scalp
                  : Risk_Percent * Scalp_Risk_Mult);
     
-    // =========================
-    // [Gate your scalps by HTF breakout]
-    // =========================
-    int htfDir = 0, htfAge = 0;
-    if(Scalp_Gate_By_HTF)
-    {
-        if(!IsStrongBreakoutHTF(
-                                TF_Scalp_Gate_HTF,
-                                HTF_Breakout_Lookback,
-                                Scalp_ATR_Period,
-                                Scalp_Gate_ATR_Margin,
-                                0,                          // 0 = S/R OR Trendline
-                                HTF_Breakout_MaxAgeBars,
-                                htfDir, htfAge))
-        {
-            return; // no valid HTF breakout → skip scalps for now
-        }
-    }
-    // =========================
-    // end HTF breakout gate
-    // =========================
-    
     // ---- Read Alligator + AO on TF_Scalp
     int    ag  = AlligatorState(TF_Scalp, 1);
     double ao1 = AOValue(TF_Scalp, 1);
@@ -1254,15 +1234,55 @@ void TryScalpEntries()
     bool buy  = (ag>0 && aoUp);
     bool sell = (ag<0 && aoDn);
     
-    // Align to HTF breakout direction (if enabled)
-    if(Scalp_Gate_By_HTF)
+    // ======================= UPGRADED HTF FILTER FOR SCALP (TREND + BREAKOUT) ===================
+    // NOTE: This uses the main strategy's HTF filter settings for consistency.
+    if(Use_HTF_Breakout_Filter)
     {
-        if(htfDir>0) sell = false;   // HTF bullish → allow only BUY scalps
-        if(htfDir<0) buy  = false;   // HTF bearish → allow only SELL scalps
+       bool finalFilterOK = false;
+
+       // --- Condition 1: Trend Alignment ---
+       bool trendAlignOK = false;
+       double htf_st_line_ignored;
+       int    htf_st_dir = 0;
+       // We use the MAIN HTF Breakout Timeframe for this check
+       if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir))
+       {
+          if(buy && htf_st_dir > 0) trendAlignOK = true;
+          if(sell && htf_st_dir < 0) trendAlignOK = true;
+       }
+
+       // --- Condition 2: Recent Breakout ---
+       bool breakoutOK = false;
+       int htfDir = 0, htfAge = 0;
+       // We use the original Scalp Gate settings for the breakout check
+       if(IsStrongBreakoutHTF(TF_Scalp_Gate_HTF, HTF_Breakout_Lookback, Scalp_ATR_Period, Scalp_Gate_ATR_Margin, 0, HTF_Breakout_MaxAgeBars, htfDir, htfAge))
+       {
+          if(buy && htfDir > 0) breakoutOK = true;
+          if(sell && htfDir < 0) breakoutOK = true;
+       }
+
+       // --- Final Decision based on Filter Mode ---
+       switch(HTF_Filter_Mode)
+       {
+          case 0: // Trend Alignment Only
+             finalFilterOK = trendAlignOK;
+             break;
+          case 1: // Breakout Only
+             finalFilterOK = breakoutOK;
+             break;
+          case 2: // BOTH Trend AND Breakout
+             finalFilterOK = trendAlignOK && breakoutOK;
+             break;
+       }
+
+       // If the final filter check fails, invalidate the scalp signal.
+       if(!finalFilterOK)
+       {
+          buy = false;
+          sell = false;
+       }
     }
-    
-    if(!(buy || sell)) return;
-    
+    // =================================================================================
     // --- Smart Trend Confirmation Logic for Scalp ---
     bool isTrendFlip = (dirM15 != 0 && dirM15 != prevDir_ST);
     
@@ -1581,49 +1601,67 @@ void TryEntries()
         }
     }
     
-    // ======================= HTF BREAKOUT GATE (UPDATED) ===================
+    // ======================= UPGRADED HTF FILTER (TREND + BREAKOUT) ===================
+    if(Use_HTF_Breakout_Filter)
     {
-        // Auto-map: M15 entries gate by H4; H1 entries gate by D1
-        ENUM_TIMEFRAMES tfHTF = PERIOD_H4;
-        if(TF_Trade==PERIOD_H1)  tfHTF = PERIOD_D1;
-        else if(TF_Trade==PERIOD_M15) tfHTF = PERIOD_H4;
-        
-        int bH_htf, bL_htf; double pH_htf, pL_htf;
-        if(!RecentSwings(tfHTF, 600, bH_htf, pH_htf, bL_htf, pL_htf)) return;
-        
-        double atrHTF = 0.0;
-        int hATR_htf = iATR(_Symbol, tfHTF, ST_ATR_Period);
-        if(hATR_htf!=INVALID_HANDLE)
-        {
-            double ahtf[]; ArraySetAsSeries(ahtf,true);
-            if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1];
-            IndicatorRelease(hATR_htf);
-        }
-        if(atrHTF<=0.0) return;
-        
-        double cHTF = iClose(_Symbol, tfHTF, 1);
-        double mHTF = Breakout_ATR_Margin * atrHTF;
-        
-        bool htfBuyOK  = (cHTF >= (pH_htf + mHTF));
-        bool htfSellOK = (cHTF <= (pL_htf - mHTF));
-        
-        // Apply the filter as a directional guide, not a hard stop
-        if(htfBuyOK && !htfSellOK) // If there is a clean HTF buy signal
-        {
-            sellCond = false; // Only allow buys
-        }
-        else if(htfSellOK && !htfBuyOK) // If there is a clean HTF sell signal
-        {
-            buyCond = false; // Only allow sells
-        }
-        else // If there is no clean signal or signals in both directions (choppy)
-        {
-            buyCond = false;  // Do not trade
-            sellCond = false; // Do not trade
-        }
-        
+       bool finalFilterOK = false;
+
+       // --- Condition 1: Trend Alignment ---
+       bool trendAlignOK = false;
+       double htf_st_line_ignored;
+       int    htf_st_dir = 0;
+       if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir))
+       {
+          if(buyCond && htf_st_dir > 0) trendAlignOK = true;
+          if(sellCond && htf_st_dir < 0) trendAlignOK = true;
+       }
+
+       // --- Condition 2: Recent Breakout ---
+       bool breakoutOK = false;
+       int bH_htf, bL_htf; double pH_htf, pL_htf;
+       if(RecentSwings(TF_HTF_Breakout, 600, bH_htf, pH_htf, bL_htf, pL_htf))
+       {
+          double atrHTF = 0.0;
+          int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
+          if(hATR_htf != INVALID_HANDLE)
+          {
+             double ahtf[]; ArraySetAsSeries(ahtf,true);
+             if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1];
+             IndicatorRelease(hATR_htf);
+          }
+          if(atrHTF > 0.0)
+          {
+             double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1);
+             double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
+             bool htfBuyOK  = (cHTF >= (pH_htf + mHTF));
+             bool htfSellOK = (cHTF <= (pL_htf - mHTF));
+             if(buyCond && htfBuyOK) breakoutOK = true;
+             if(sellCond && htfSellOK) breakoutOK = true;
+          }
+       }
+
+       // --- Final Decision based on Filter Mode ---
+       switch(HTF_Filter_Mode)
+       {
+          case 0: // Trend Alignment Only
+             finalFilterOK = trendAlignOK;
+             break;
+          case 1: // Breakout Only
+             finalFilterOK = breakoutOK;
+             break;
+          case 2: // BOTH Trend AND Breakout
+             finalFilterOK = trendAlignOK && breakoutOK;
+             break;
+       }
+
+       // If the final filter check fails, invalidate the trade signal.
+       if(!finalFilterOK)
+       {
+          buyCond = false;
+          sellCond = false;
+       }
     }
-    // ======================================================================
+    // =================================================================================
     
     // One position at a time (per symbol/magic)
     if(One_Trade_At_A_Time && CountOpen()>0)
