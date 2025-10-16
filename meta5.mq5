@@ -56,10 +56,10 @@ input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending 
 
 // --- Trailing Stops ---
 // --- Trailing Stops ---
-input bool           Use_ATR_Trailing   = false;    // Dynamic SL that follows price based on volatility.
+input bool           Use_ATR_Trailing   = true;    // Dynamic SL that follows price based on volatility.
 input int            ATR_Period_Trail   = 10;       // <-- ATR period for the trailing stop
 input double         ATR_Trail_Mult     = 3.5;      // Multiplier for ATR Trail. Higher = wider trail.
-input bool           Use_HalfStep_Trailing = true;  // Alternative trail: SL moves half the distance to TP.
+input bool           Use_HalfStep_Trailing = false;  // Alternative trail: SL moves half the distance to TP.
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
@@ -1289,8 +1289,8 @@ void TryScalpEntries()
     // --- Apply TP Pullback ---
     if(TP_Pullback_ATR_Mult > 0 && tp > 0)
     {
-       if(buy) tp = tp - (TP_Pullback_ATR_Mult * atr);
-       else    tp = tp + (TP_Pullback_ATR_Mult * atr);
+        if(buy) tp = tp - (TP_Pullback_ATR_Mult * atr);
+        else    tp = tp + (TP_Pullback_ATR_Mult * atr);
     }
     if( (buy && (entry - sl) <= 0) || (!buy && (sl - entry) <= 0) ) return;
     
@@ -1759,7 +1759,7 @@ void TryEntries()
             // --- Apply TP Pullback ---
             if(TP_Pullback_ATR_Mult > 0 && tp > 0)
             {
-               tp = tp + (TP_Pullback_ATR_Mult * atr);
+                tp = tp + (TP_Pullback_ATR_Mult * atr);
             }
             if((sl - entry) <= 0) return;
             
@@ -2058,15 +2058,17 @@ void ManageOpenPositions()
                     else
                     {
                         double trail = cur + ATR_Trail_Mult * atr;
-                        if(trail<sl || sl==0.0) // allow first set
+                        
+                        // <<< BUG FIX: Corrected logic to only move SL down (forward for a sell) >>>
+                        if(trail < sl)
                         {
                             double modSL=trail, modTP=tp;
                             SanitizeStops(type, modSL, modTP);
-                            if(modSL>0 && (sl==0.0 || MathAbs(modSL-sl) >= 0.5*_Point))
+                            if(modSL>0 && MathAbs(modSL-sl) >= 0.5*_Point)
                             {
                                 if(Trade.PositionModify(_Symbol, modSL, modTP))
                                 {
-                                    g_trailingActivated = true; // <-- ADD THIS LINE
+                                    g_trailingActivated = true;
                                 }
                             }
                         }
