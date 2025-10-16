@@ -20,18 +20,35 @@ CTrade Trade;
 // --- General ---
 input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place trades, false = signals only
 
+//---- Telegram
+input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
+input string          TG_CHAT_ID           = "394044850";
+input bool            TG_Send_Images       = false; // reserved (text only here)
+
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
 input double         Risk_Percent     = 0;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
-input bool           Use_Scalp_Mode   = true;     // MASTER SWITCH: Turn the scalping engine on/off.
-input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // The timeframe the scalp strategy reads from.
+input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
+input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = true;  // true = use fixed lot below, false = use risk %
-input double         Fixed_Lots_Scalp = 0.50;      // Lot size for scalp trades.
+input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
 input double         Risk_Percent_Scalp = 20;      // if >0, overrides and uses this absolute % just for scalps
 
+input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
+input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;  // breakout filter Timeframe.
+
+input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
+input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_M15; // scalp alignment filter Timeframe.
+
+input bool           Cancel_Pending_On_Flip = true; // Cancel pending orders if SuperTrend flips.
+input bool           Use_Pending_Stop_Entries = true;
+input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_M15; // Main trade pending orders Timeframe to watch.
+
+input bool           Scalp_Use_Pending_Stop_Entries = true;
+input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending orders Timeframe to watch.
 //================================================================================
 //                 --- TRADE MANAGEMENT & EXITS ---
 //================================================================================
@@ -71,17 +88,12 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
-input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;  // Timeframe for the breakout filter.
 input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
-input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
-input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_H1; // Timeframe for the scalp alignment filter.
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
 input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
-
 
 //================================================================================
 //                --- ADVANCED & SYSTEM SETTINGS ---
@@ -103,12 +115,10 @@ input bool           Use_WPR_Bias     = true;
 input bool           Use_WPR_Cross    = false;
 
 // --- Pending Order Mechanics ---
-input bool           Use_Pending_Stop_Entries = false;
 input double         StopEntry_Offset_ATR = 0.2;
-input int            StopEntry_Expiry_Bars = 8;
-input bool           Scalp_Use_Pending_Stop_Entries = false;
+input int            StopEntry_Expiry_Bars = 12;
 input double         Scalp_StopEntry_Offset_ATR = 0.02;
-input int            Scalp_StopEntry_Expiry_Bars = 8;
+input int            Scalp_StopEntry_Expiry_Bars = 12;
 input double         Scalp_Market_Entry_ATR_Zone = 3;
 
 // --- Manual Trade Management ---
@@ -171,11 +181,6 @@ input bool           Send_Monthly_Report = true;
 input int            Monthly_Report_DOM = 1;
 input int            Monthly_Report_Hour = 21;
 input int            Monthly_Report_Min = 0;
-
-//---- Telegram
-input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
-input string          TG_CHAT_ID           = "394044850";
-input bool            TG_Send_Images       = false; // reserved (text only here)
 
 //============================== Globals =============================
 datetime lastTradeBarTime = 0;
@@ -255,6 +260,56 @@ string URLEncode(const string s)
    return out;
 }
 //======================== Indicator Helpers =========================
+
+// NEW, UPGRADED FUNCTION: Manages pending orders based on their type (Main vs. Scalp).
+void ManagePendingOrders()
+{
+   if (!Cancel_Pending_On_Flip) return; // Only run if the feature is enabled.
+
+   // Get the current SuperTrend direction for BOTH gate timeframes.
+   double st_main_line; 
+   int st_main_dir;
+   if (!CalcSuperTrend(TF_Main_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_main_line, st_main_dir)) return;
+
+   double st_scalp_line; 
+   int st_scalp_dir;
+   if (!CalcSuperTrend(TF_Scalp_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_scalp_line, st_scalp_dir)) return;
+
+   // Loop through all pending orders.
+   for (int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if (OrderSelect(ticket))
+      {
+         if (OrderGetInteger(ORDER_MAGIC) == Magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+         {
+            long   orderType = OrderGetInteger(ORDER_TYPE);
+            string comment   = OrderGetString(ORDER_COMMENT);
+            bool   isScalp   = (StringFind(comment, "Scalp", 0) >= 0);
+
+            // *** THE CORE LOGIC CHANGE ***
+            // Choose the correct trend direction and timeframe based on whether the order is a scalp or not.
+            int relevantST_dir = isScalp ? st_scalp_dir : st_main_dir;
+            ENUM_TIMEFRAMES relevant_TF = isScalp ? TF_Scalp_Cancel_Gate : TF_Main_Cancel_Gate;
+
+            bool isBuyOrder  = (orderType == ORDER_TYPE_BUY_STOP || orderType == ORDER_TYPE_BUY_LIMIT);
+            bool isSellOrder = (orderType == ORDER_TYPE_SELL_STOP || orderType == ORDER_TYPE_SELL_LIMIT);
+
+            // If the order direction mismatches its relevant trend, cancel it.
+            if ((isBuyOrder && relevantST_dir < 0) || (isSellOrder && relevantST_dir > 0))
+            {
+               if (Trade.OrderDelete(ticket))
+               {
+                  SendTG(StringFormat("🔵 <b>PENDING ORDER CANCELED</b>\n\n"
+                                      "📊 <b>Symbol:</b> %s\n"
+                                      "⚡ <b>Reason:</b> Trend flipped on %s.",
+                                      _Symbol, tfstr(relevant_TF)));
+               }
+            }
+         }
+      }
+   }
+}
 
 //+------------------------------------------------------------------+
 //| Checks for a clean breakout candle followed by confirmation candles. |
