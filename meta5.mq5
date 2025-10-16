@@ -27,15 +27,15 @@ input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
-input double         Risk_Percent     = 0;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Risk_Percent     = 1;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
 input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
-input bool           Scalp_Use_Fixed_Lot = true;  // true = use fixed lot below, false = use risk %
+input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 20;      // if >0, overrides and uses this absolute % just for scalps
+input double         Risk_Percent_Scalp = 2;      // if >0, overrides and uses this absolute % just for scalps
 
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
 input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;  // breakout filter Timeframe.
@@ -49,6 +49,9 @@ input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_M15; // Main trade pending o
 
 input bool           Scalp_Use_Pending_Stop_Entries = true;
 input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending orders Timeframe to watch.
+// --- NEW: Retracement Limit Entry Settings ---
+input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit order on pullback.
+
 //================================================================================
 //                 --- TRADE MANAGEMENT & EXITS ---
 //================================================================================
@@ -262,6 +265,104 @@ string URLEncode(const string s)
 }
 //======================== Indicator Helpers =========================
 
+// UPGRADED FUNCTION: Adds a limit order at a calculated SuperTrend retest point.
+void ManageRetraceLimitOrders()
+{
+   if (!Use_Retrace_Limit_Entry || CountPendingThisEA() != 1)
+   {
+      return; // Feature is off, or we don't have exactly one pending order.
+   }
+
+   // --- Find our single pending stop order and get its properties ---
+   ulong  stop_order_ticket = 0;
+   long   stop_order_type = 0;
+   double stop_order_sl = 0;
+   double stop_order_tp = 0;
+
+   for (int i = 0; i < OrdersTotal(); i++)
+   {
+      if (OrderSelect(OrderGetTicket(i)))
+      {
+         if (OrderGetInteger(ORDER_MAGIC) == Magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+         {
+            stop_order_ticket = OrderGetTicket(i);
+            stop_order_type = OrderGetInteger(ORDER_TYPE);
+            stop_order_sl = OrderGetDouble(ORDER_SL);
+            stop_order_tp = OrderGetDouble(ORDER_TP);
+            break; // Found it
+         }
+      }
+   }
+
+   if (stop_order_ticket == 0 || stop_order_sl <= 0 || stop_order_tp <= 0) return; // No valid pending order found.
+
+   // --- Find the retrace entry point using our new smart function ---
+   double limit_price = 0;
+   if(!FindRetraceEntryWithinRange(stop_order_type, stop_order_sl, stop_order_tp, limit_price))
+   {
+      return; // No valid retrace entry found within the range.
+   }
+
+   // --- Calculate the new SL and TP for this new limit order ---
+   double new_sl = 0, new_tp = 0;
+   bool isBuy = (stop_order_type == ORDER_TYPE_BUY_STOP);
+
+   double pH, pL, atr;
+   if(!GetSwingsATR(TF_Main_Cancel_Gate, 300, ST_ATR_Period, pH, pL, atr)) return;
+   if(!BuildSLTP_FromSwings(isBuy, limit_price, pH, pL, atr, Use_Fib_Targets, RR_Min, new_sl, new_tp)) return;
+
+   // --- Place the New Limit Order ---
+   double lots = LotsByRisk(Risk_Percent, MathAbs(limit_price - new_sl) / _Point);
+   if(lots <= 0) lots = Fixed_Lots;
+
+   ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
+   datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+
+   if(isBuy)
+   {
+      Trade.BuyLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Buy Retrace Limit");
+   }
+   else
+   {
+      Trade.SellLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Sell Retrace Limit");
+   }
+}
+
+// NEW HELPER FUNCTION: Finds a valid SuperTrend retest entry within a given price range.
+bool FindRetraceEntryWithinRange(long tradeType, double rangeBottom, double rangeTop, double &retracePriceOut)
+{
+   // Get the SuperTrend line on the retrace timeframe (the main cancel gate)
+   double st_line;
+   int st_dir;
+   if (!CalcSuperTrend(TF_Main_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_line, st_dir))
+   {
+      return false; // Cannot get ST data.
+   }
+
+   bool isBuy = (tradeType == ORDER_TYPE_BUY_STOP);
+
+   // THE CORE RULE: Check if the ST line is a valid retrace entry WITHIN the SL/TP range.
+   if (isBuy && st_dir > 0)
+   {
+      // For a BUY, the ST line must be above the SL and below the current price (a valid limit entry)
+      if (st_line > rangeBottom && st_line < SymbolInfoDouble(_Symbol, SYMBOL_ASK))
+      {
+         retracePriceOut = st_line;
+         return true;
+      }
+   }
+   else if (!isBuy && st_dir < 0)
+   {
+      // For a SELL, the ST line must be below the SL and above the current price
+      if (st_line < rangeTop && st_line > SymbolInfoDouble(_Symbol, SYMBOL_BID))
+      {
+         retracePriceOut = st_line;
+         return true;
+      }
+   }
+
+   return false; // No valid retrace entry found.
+}
 // NEW, UPGRADED FUNCTION: Manages pending orders based on their type (Main vs. Scalp).
 void ManagePendingOrders()
 {
@@ -2300,7 +2401,8 @@ void OnTick()
     if(currentBarTime != lastBarTime)
     {
         lastBarTime = currentBarTime;
-        
+        ManagePendingOrders();
+        ManageRetraceLimitOrders(); // <-- ADD THIS LINE
         // Check for main strategy entries.
         TryEntries();
         
