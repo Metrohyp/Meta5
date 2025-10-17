@@ -1975,35 +1975,125 @@ void TryEntries()
 }
 
 // Apply breakeven & trailing for open positions
+// UPGRADED ManageOpenPositions() FUNCTION WITH TIERED EXITS
+
 void ManageOpenPositions()
+
 {
-    int total = PositionsTotal();
-    for(int p=0; p<total; ++p)
-    {
-        ulong ticket = PositionGetTicket(p);
-        if(!PositionSelectByTicket(ticket)) continue;
-        
-        string sym = (string)PositionGetString(POSITION_SYMBOL);
-        if(sym != _Symbol) continue;
-        
-        long magic = PositionGetInteger(POSITION_MAGIC);
-        bool isEA      = (magic==Magic);
-        bool isManual  = (magic==0);
-        
-        if(!(isEA || (ApplyToManualTrades && isManual))) continue;
-        
-        long   type  = PositionGetInteger(POSITION_TYPE);
-        double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-        double sl    = PositionGetDouble(POSITION_SL);
-        double tp    = PositionGetDouble(POSITION_TP);
-        
-        double cur = (type==POSITION_TYPE_BUY)
-        ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
-        : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        
-        string pcomment = (string)PositionGetString(POSITION_COMMENT);
-        bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
-        if(Protect_Scalp_SLTP && isScalp) continue;  // skip all SL/TP changes for scalps
+
+   // --- Get current SuperTrend directions for both strategies at the start ---
+
+   double main_st_line; int main_st_dir;
+
+   if (!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, main_st_line, main_st_dir)) return;
+
+
+
+   double scalp_st_line; int scalp_st_dir;
+
+   if (Use_Scalp_Mode && !CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, scalp_st_line, scalp_st_dir)) return;
+
+
+
+   // --- Loop through all open positions ---
+
+   for(int p = PositionsTotal() - 1; p >= 0; p--)
+
+   {
+
+      ulong ticket = PositionGetTicket(p);
+
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      
+
+      string sym = (string)PositionGetString(POSITION_SYMBOL);
+
+      if(sym != _Symbol) continue;
+
+      
+
+      long magic = PositionGetInteger(POSITION_MAGIC);
+
+      bool isEA      = (magic==Magic);
+
+      bool isManual  = (magic==0);
+
+      
+
+      if(!(isEA || (ApplyToManualTrades && isManual))) continue;
+
+      
+
+      long   type  = PositionGetInteger(POSITION_TYPE);
+
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+
+      double sl    = PositionGetDouble(POSITION_SL);
+
+      double tp    = PositionGetDouble(POSITION_TP);
+
+      double cur = (type==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      string pcomment = (string)PositionGetString(POSITION_COMMENT);
+
+      bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
+
+
+
+      // ======================= TIER 1: MAIN TREND FLIP (HIGHEST PRIORITY) =======================
+
+      // If the main trend flips, close ALL positions (main, scalp, manual).
+
+      int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
+
+      if (main_st_dir != requiredDir)
+
+      {
+
+         if (Trade.PositionClose(ticket))
+
+         {
+
+            SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f",
+
+                                pcomment, tfstr(TF_Trade), cur));
+
+         }
+
+         continue; // Position is closed, move to the next one.
+
+      }
+
+
+
+      // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
+
+      // If this is a scalp trade AND the scalp trend has flipped, close ONLY this scalp trade.
+
+      if (isScalp && scalp_st_dir != requiredDir)
+
+      {
+
+         if (Trade.PositionClose(ticket))
+
+         {
+
+            SendTG(StringFormat("🛑 %s closed: SCALP TREND flipped on %s. Exit price %.2f",
+
+                                pcomment, tfstr(TF_Scalp), cur));
+
+         }
+
+         continue; // Position is closed, move to the next one.
+
+      }
+
+      
+
+      // If a position is a scalp and Protect_Scalp_SLTP is on, skip all further management.
+
+      if(Protect_Scalp_SLTP && isScalp) continue;
         
         // --- Breakeven (BE) & Protection Logic (Percentage Only) ---
         // Note: BE_Activation_TP_Percent must be > 0.0 to enable this block.
@@ -2218,29 +2308,6 @@ void ManageOpenPositions()
         }
         // [INSERT THIS BLOCK BEFORE LINE 810 (BE/Protection Logic)]
         
-        // --- Aggressive Trend Change Exit (New Requirement) ---
-        // Exits the trade immediately if the SuperTrend on the trade TF flips.
-        double currentSTLine = 0.0;
-        int    currentSTDir = 0;
-        
-        // Use ST settings from inputs (ST_ATR_Period, ST_ATR_Mult)
-        if (CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, currentSTLine, currentSTDir))
-        {
-            int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
-            
-            // Exit if the SuperTrend flips against the trade direction
-            if (currentSTDir != requiredDir)
-            {
-                // Trend flip detected: Close the position aggressively
-                if (Trade.PositionClose(ticket))
-                {
-                    SendTG(StringFormat("🛑 %s closed: Trend flip detected on %s. Exit price %.2f",
-                                        pcomment, tfstr(TF_Trade), cur));
-                    continue; // Position closed, move to next position
-                }
-            }
-        }
-        // --- End Aggressive Trend Change Exit ---
     }
 }
 
