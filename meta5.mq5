@@ -270,100 +270,100 @@ string URLEncode(const string s)
 // UPGRADED FUNCTION: Adds a limit order at a calculated SuperTrend retest point.
 void ManageRetraceLimitOrders()
 {
-   if (!Use_Retrace_Limit_Entry || CountPendingThisEA() != 1)
-   {
-      return; // Feature is off, or we don't have exactly one pending order.
-   }
-
-   // --- Find our single pending stop order and get its properties ---
-   ulong  stop_order_ticket = 0;
-   long   stop_order_type = 0;
-   double stop_order_sl = 0;
-   double stop_order_tp = 0;
-
-   for (int i = 0; i < OrdersTotal(); i++)
-   {
-      if (OrderSelect(OrderGetTicket(i)))
-      {
-         if (OrderGetInteger(ORDER_MAGIC) == Magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
-         {
-            stop_order_ticket = OrderGetTicket(i);
-            stop_order_type = OrderGetInteger(ORDER_TYPE);
-            stop_order_sl = OrderGetDouble(ORDER_SL);
-            stop_order_tp = OrderGetDouble(ORDER_TP);
-            break; // Found it
-         }
-      }
-   }
-
-   if (stop_order_ticket == 0 || stop_order_sl <= 0 || stop_order_tp <= 0) return; // No valid pending order found.
-
-   // --- Find the retrace entry point using our new smart function ---
-   double limit_price = 0;
-   if(!FindRetraceEntryWithinRange(stop_order_type, stop_order_sl, stop_order_tp, limit_price))
-   {
-      return; // No valid retrace entry found within the range.
-   }
-
-   // --- Calculate the new SL and TP for this new limit order ---
-   double new_sl = 0, new_tp = 0;
-   bool isBuy = (stop_order_type == ORDER_TYPE_BUY_STOP);
-
-   double pH, pL, atr;
-   if(!GetSwingsATR(TF_Main_Cancel_Gate, 300, ST_ATR_Period, pH, pL, atr)) return;
-   if(!BuildSLTP_FromSwings(isBuy, limit_price, pH, pL, atr, Use_Fib_Targets, RR_Min, new_sl, new_tp)) return;
-
-   // --- Place the New Limit Order ---
-   double lots = LotsByRisk(Risk_Percent, MathAbs(limit_price - new_sl) / _Point);
-   if(lots <= 0) lots = Fixed_Lots;
-
-   ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
-   datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-
-   if(isBuy)
-   {
-      Trade.BuyLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Buy Retrace Limit");
-   }
-   else
-   {
-      Trade.SellLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Sell Retrace Limit");
-   }
+    if (!Use_Retrace_Limit_Entry || CountPendingThisEA() != 1)
+    {
+        return; // Feature is off, or we don't have exactly one pending order.
+    }
+    
+    // --- Find our single pending stop order and get its properties ---
+    ulong  stop_order_ticket = 0;
+    long   stop_order_type = 0;
+    double stop_order_sl = 0;
+    double stop_order_tp = 0;
+    
+    for (int i = 0; i < OrdersTotal(); i++)
+    {
+        if (OrderSelect(OrderGetTicket(i)))
+        {
+            if (OrderGetInteger(ORDER_MAGIC) == Magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+            {
+                stop_order_ticket = OrderGetTicket(i);
+                stop_order_type = OrderGetInteger(ORDER_TYPE);
+                stop_order_sl = OrderGetDouble(ORDER_SL);
+                stop_order_tp = OrderGetDouble(ORDER_TP);
+                break; // Found it
+            }
+        }
+    }
+    
+    if (stop_order_ticket == 0 || stop_order_sl <= 0 || stop_order_tp <= 0) return; // No valid pending order found.
+    
+    // --- Find the retrace entry point using our new smart function ---
+    double limit_price = 0;
+    if(!FindRetraceEntryWithinRange(stop_order_type, stop_order_sl, stop_order_tp, limit_price))
+    {
+        return; // No valid retrace entry found within the range.
+    }
+    
+    // --- Calculate the new SL and TP for this new limit order ---
+    double new_sl = 0, new_tp = 0;
+    bool isBuy = (stop_order_type == ORDER_TYPE_BUY_STOP);
+    
+    double pH, pL, atr;
+    if(!GetSwingsATR(TF_Main_Cancel_Gate, 300, ST_ATR_Period, pH, pL, atr)) return;
+    if(!BuildSLTP_FromSwings(isBuy, limit_price, pH, pL, atr, Use_Fib_Targets, RR_Min, new_sl, new_tp)) return;
+    
+    // --- Place the New Limit Order ---
+    double lots = LotsByRisk(Risk_Percent, MathAbs(limit_price - new_sl) / _Point);
+    if(lots <= 0) lots = Fixed_Lots;
+    
+    ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
+    datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+    
+    if(isBuy)
+    {
+        Trade.BuyLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Buy Retrace Limit");
+    }
+    else
+    {
+        Trade.SellLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Sell Retrace Limit");
+    }
 }
 
 // NEW HELPER FUNCTION: Finds a valid SuperTrend retest entry within a given price range.
 bool FindRetraceEntryWithinRange(long tradeType, double rangeBottom, double rangeTop, double &retracePriceOut)
 {
-   // Get the SuperTrend line on the retrace timeframe (the main cancel gate)
-   double st_line;
-   int st_dir;
-   if (!CalcSuperTrend(TF_Main_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_line, st_dir))
-   {
-      return false; // Cannot get ST data.
-   }
-
-   bool isBuy = (tradeType == ORDER_TYPE_BUY_STOP);
-
-   // THE CORE RULE: Check if the ST line is a valid retrace entry WITHIN the SL/TP range.
-   if (isBuy && st_dir > 0)
-   {
-      // For a BUY, the ST line must be above the SL and below the current price (a valid limit entry)
-      if (st_line > rangeBottom && st_line < SymbolInfoDouble(_Symbol, SYMBOL_ASK))
-      {
-         retracePriceOut = st_line;
-         return true;
-      }
-   }
-   else if (!isBuy && st_dir < 0)
-   {
-      // For a SELL, the ST line must be below the SL and above the current price
-      if (st_line < rangeTop && st_line > SymbolInfoDouble(_Symbol, SYMBOL_BID))
-      {
-         retracePriceOut = st_line;
-         return true;
-      }
-   }
-
-   return false; // No valid retrace entry found.
+    // Get the SuperTrend line on the retrace timeframe (the main cancel gate)
+    double st_line;
+    int st_dir;
+    if (!CalcSuperTrend(TF_Main_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_line, st_dir))
+    {
+        return false; // Cannot get ST data.
+    }
+    
+    bool isBuy = (tradeType == ORDER_TYPE_BUY_STOP);
+    
+    // THE CORE RULE: Check if the ST line is a valid retrace entry WITHIN the SL/TP range.
+    if (isBuy && st_dir > 0)
+    {
+        // For a BUY, the ST line must be above the SL and below the current price (a valid limit entry)
+        if (st_line > rangeBottom && st_line < SymbolInfoDouble(_Symbol, SYMBOL_ASK))
+        {
+            retracePriceOut = st_line;
+            return true;
+        }
+    }
+    else if (!isBuy && st_dir < 0)
+    {
+        // For a SELL, the ST line must be below the SL and above the current price
+        if (st_line < rangeTop && st_line > SymbolInfoDouble(_Symbol, SYMBOL_BID))
+        {
+            retracePriceOut = st_line;
+            return true;
+        }
+    }
+    
+    return false; // No valid retrace entry found.
 }
 // NEW, UPGRADED FUNCTION: Manages pending orders based on their type (Main vs. Scalp).
 void ManagePendingOrders()
@@ -1238,49 +1238,49 @@ void TryScalpEntries()
     // NOTE: This uses the main strategy's HTF filter settings for consistency.
     if(Use_HTF_Breakout_Filter)
     {
-       bool finalFilterOK = false;
-
-       // --- Condition 1: Trend Alignment ---
-       bool trendAlignOK = false;
-       double htf_st_line_ignored;
-       int    htf_st_dir = 0;
-       // We use the MAIN HTF Breakout Timeframe for this check
-       if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir))
-       {
-          if(buy && htf_st_dir > 0) trendAlignOK = true;
-          if(sell && htf_st_dir < 0) trendAlignOK = true;
-       }
-
-       // --- Condition 2: Recent Breakout ---
-       bool breakoutOK = false;
-       int htfDir = 0, htfAge = 0;
-       // We use the original Scalp Gate settings for the breakout check
-       if(IsStrongBreakoutHTF(TF_Scalp_Gate_HTF, HTF_Breakout_Lookback, Scalp_ATR_Period, Scalp_Gate_ATR_Margin, 0, HTF_Breakout_MaxAgeBars, htfDir, htfAge))
-       {
-          if(buy && htfDir > 0) breakoutOK = true;
-          if(sell && htfDir < 0) breakoutOK = true;
-       }
-
-       // --- Final Decision based on Filter Mode ---
-       switch(HTF_Filter_Mode)
-       {
-          case 0: // Trend Alignment Only
-             finalFilterOK = trendAlignOK;
-             break;
-          case 1: // Breakout Only
-             finalFilterOK = breakoutOK;
-             break;
-          case 2: // BOTH Trend AND Breakout
-             finalFilterOK = trendAlignOK && breakoutOK;
-             break;
-       }
-
-       // If the final filter check fails, invalidate the scalp signal.
-       if(!finalFilterOK)
-       {
-          buy = false;
-          sell = false;
-       }
+        bool finalFilterOK = false;
+        
+        // --- Condition 1: Trend Alignment ---
+        bool trendAlignOK = false;
+        double htf_st_line_ignored;
+        int    htf_st_dir = 0;
+        // We use the MAIN HTF Breakout Timeframe for this check
+        if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir))
+        {
+            if(buy && htf_st_dir > 0) trendAlignOK = true;
+            if(sell && htf_st_dir < 0) trendAlignOK = true;
+        }
+        
+        // --- Condition 2: Recent Breakout ---
+        bool breakoutOK = false;
+        int htfDir = 0, htfAge = 0;
+        // We use the original Scalp Gate settings for the breakout check
+        if(IsStrongBreakoutHTF(TF_Scalp_Gate_HTF, HTF_Breakout_Lookback, Scalp_ATR_Period, Scalp_Gate_ATR_Margin, 0, HTF_Breakout_MaxAgeBars, htfDir, htfAge))
+        {
+            if(buy && htfDir > 0) breakoutOK = true;
+            if(sell && htfDir < 0) breakoutOK = true;
+        }
+        
+        // --- Final Decision based on Filter Mode ---
+        switch(HTF_Filter_Mode)
+        {
+            case 0: // Trend Alignment Only
+                finalFilterOK = trendAlignOK;
+                break;
+            case 1: // Breakout Only
+                finalFilterOK = breakoutOK;
+                break;
+            case 2: // BOTH Trend AND Breakout
+                finalFilterOK = trendAlignOK && breakoutOK;
+                break;
+        }
+        
+        // If the final filter check fails, invalidate the scalp signal.
+        if(!finalFilterOK)
+        {
+            buy = false;
+            sell = false;
+        }
     }
     // =================================================================================
     // --- Smart Trend Confirmation Logic for Scalp ---
@@ -1489,9 +1489,12 @@ void TryScalpEntries()
         }
         else // "Limit"
         {
-            datetime expiration = TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
-            if (buy) sent = Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, ORDER_TIME_SPECIFIED, expiration, "V25 Scalp Buy Limit");
-            else sent = Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, ORDER_TIME_SPECIFIED, expiration, "V25 Scalp Sell Limit");
+            // --- CORRECTED: Use dynamic expiration based on the new setting ---
+            ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
+            datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
+            
+            if (buy) sent = Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, "V25 Scalp Buy Limit");
+            else sent = Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, "V25 Scalp Sell Limit");
         }
     }
 }
@@ -1604,62 +1607,62 @@ void TryEntries()
     // ======================= UPGRADED HTF FILTER (TREND + BREAKOUT) ===================
     if(Use_HTF_Breakout_Filter)
     {
-       bool finalFilterOK = false;
-
-       // --- Condition 1: Trend Alignment ---
-       bool trendAlignOK = false;
-       double htf_st_line_ignored;
-       int    htf_st_dir = 0;
-       if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir))
-       {
-          if(buyCond && htf_st_dir > 0) trendAlignOK = true;
-          if(sellCond && htf_st_dir < 0) trendAlignOK = true;
-       }
-
-       // --- Condition 2: Recent Breakout ---
-       bool breakoutOK = false;
-       int bH_htf, bL_htf; double pH_htf, pL_htf;
-       if(RecentSwings(TF_HTF_Breakout, 600, bH_htf, pH_htf, bL_htf, pL_htf))
-       {
-          double atrHTF = 0.0;
-          int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
-          if(hATR_htf != INVALID_HANDLE)
-          {
-             double ahtf[]; ArraySetAsSeries(ahtf,true);
-             if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1];
-             IndicatorRelease(hATR_htf);
-          }
-          if(atrHTF > 0.0)
-          {
-             double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1);
-             double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
-             bool htfBuyOK  = (cHTF >= (pH_htf + mHTF));
-             bool htfSellOK = (cHTF <= (pL_htf - mHTF));
-             if(buyCond && htfBuyOK) breakoutOK = true;
-             if(sellCond && htfSellOK) breakoutOK = true;
-          }
-       }
-
-       // --- Final Decision based on Filter Mode ---
-       switch(HTF_Filter_Mode)
-       {
-          case 0: // Trend Alignment Only
-             finalFilterOK = trendAlignOK;
-             break;
-          case 1: // Breakout Only
-             finalFilterOK = breakoutOK;
-             break;
-          case 2: // BOTH Trend AND Breakout
-             finalFilterOK = trendAlignOK && breakoutOK;
-             break;
-       }
-
-       // If the final filter check fails, invalidate the trade signal.
-       if(!finalFilterOK)
-       {
-          buyCond = false;
-          sellCond = false;
-       }
+        bool finalFilterOK = false;
+        
+        // --- Condition 1: Trend Alignment ---
+        bool trendAlignOK = false;
+        double htf_st_line_ignored;
+        int    htf_st_dir = 0;
+        if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir))
+        {
+            if(buyCond && htf_st_dir > 0) trendAlignOK = true;
+            if(sellCond && htf_st_dir < 0) trendAlignOK = true;
+        }
+        
+        // --- Condition 2: Recent Breakout ---
+        bool breakoutOK = false;
+        int bH_htf, bL_htf; double pH_htf, pL_htf;
+        if(RecentSwings(TF_HTF_Breakout, 600, bH_htf, pH_htf, bL_htf, pL_htf))
+        {
+            double atrHTF = 0.0;
+            int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
+            if(hATR_htf != INVALID_HANDLE)
+            {
+                double ahtf[]; ArraySetAsSeries(ahtf,true);
+                if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1];
+                IndicatorRelease(hATR_htf);
+            }
+            if(atrHTF > 0.0)
+            {
+                double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1);
+                double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
+                bool htfBuyOK  = (cHTF >= (pH_htf + mHTF));
+                bool htfSellOK = (cHTF <= (pL_htf - mHTF));
+                if(buyCond && htfBuyOK) breakoutOK = true;
+                if(sellCond && htfSellOK) breakoutOK = true;
+            }
+        }
+        
+        // --- Final Decision based on Filter Mode ---
+        switch(HTF_Filter_Mode)
+        {
+            case 0: // Trend Alignment Only
+                finalFilterOK = trendAlignOK;
+                break;
+            case 1: // Breakout Only
+                finalFilterOK = breakoutOK;
+                break;
+            case 2: // BOTH Trend AND Breakout
+                finalFilterOK = trendAlignOK && breakoutOK;
+                break;
+        }
+        
+        // If the final filter check fails, invalidate the trade signal.
+        if(!finalFilterOK)
+        {
+            buyCond = false;
+            sellCond = false;
+        }
     }
     // =================================================================================
     
@@ -1980,120 +1983,120 @@ void TryEntries()
 void ManageOpenPositions()
 
 {
-
-   // --- Get current SuperTrend directions for both strategies at the start ---
-
-   double main_st_line; int main_st_dir;
-
-   if (!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, main_st_line, main_st_dir)) return;
-
-
-
-   double scalp_st_line; int scalp_st_dir;
-
-   if (Use_Scalp_Mode && !CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, scalp_st_line, scalp_st_dir)) return;
-
-
-
-   // --- Loop through all open positions ---
-
-   for(int p = PositionsTotal() - 1; p >= 0; p--)
-
-   {
-
-      ulong ticket = PositionGetTicket(p);
-
-      if(!PositionSelectByTicket(ticket)) continue;
-
-      
-
-      string sym = (string)PositionGetString(POSITION_SYMBOL);
-
-      if(sym != _Symbol) continue;
-
-      
-
-      long magic = PositionGetInteger(POSITION_MAGIC);
-
-      bool isEA      = (magic==Magic);
-
-      bool isManual  = (magic==0);
-
-      
-
-      if(!(isEA || (ApplyToManualTrades && isManual))) continue;
-
-      
-
-      long   type  = PositionGetInteger(POSITION_TYPE);
-
-      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-
-      double sl    = PositionGetDouble(POSITION_SL);
-
-      double tp    = PositionGetDouble(POSITION_TP);
-
-      double cur = (type==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-      string pcomment = (string)PositionGetString(POSITION_COMMENT);
-
-      bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
-
-
-
-      // ======================= TIER 1: MAIN TREND FLIP (HIGHEST PRIORITY) =======================
-
-      // If the main trend flips, close ALL positions (main, scalp, manual).
-
-      int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
-
-      if (main_st_dir != requiredDir)
-
-      {
-
-         if (Trade.PositionClose(ticket))
-
-         {
-
-            SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f",
-
-                                pcomment, tfstr(TF_Trade), cur));
-
-         }
-
-         continue; // Position is closed, move to the next one.
-
-      }
-
-
-
-      // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
-
-      // If this is a scalp trade AND the scalp trend has flipped, close ONLY this scalp trade.
-
-      if (isScalp && scalp_st_dir != requiredDir)
-
-      {
-
-         if (Trade.PositionClose(ticket))
-
-         {
-
-            SendTG(StringFormat("🛑 %s closed: SCALP TREND flipped on %s. Exit price %.2f",
-
-                                pcomment, tfstr(TF_Scalp), cur));
-
-         }
-
-         continue; // Position is closed, move to the next one.
-
-      }
-
-      
-
-      // If a position is a scalp and Protect_Scalp_SLTP is on, skip all further management.
-
-      if(Protect_Scalp_SLTP && isScalp) continue;
+    
+    // --- Get current SuperTrend directions for both strategies at the start ---
+    
+    double main_st_line; int main_st_dir;
+    
+    if (!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, main_st_line, main_st_dir)) return;
+    
+    
+    
+    double scalp_st_line; int scalp_st_dir;
+    
+    if (Use_Scalp_Mode && !CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, scalp_st_line, scalp_st_dir)) return;
+    
+    
+    
+    // --- Loop through all open positions ---
+    
+    for(int p = PositionsTotal() - 1; p >= 0; p--)
+        
+    {
+        
+        ulong ticket = PositionGetTicket(p);
+        
+        if(!PositionSelectByTicket(ticket)) continue;
+        
+        
+        
+        string sym = (string)PositionGetString(POSITION_SYMBOL);
+        
+        if(sym != _Symbol) continue;
+        
+        
+        
+        long magic = PositionGetInteger(POSITION_MAGIC);
+        
+        bool isEA      = (magic==Magic);
+        
+        bool isManual  = (magic==0);
+        
+        
+        
+        if(!(isEA || (ApplyToManualTrades && isManual))) continue;
+        
+        
+        
+        long   type  = PositionGetInteger(POSITION_TYPE);
+        
+        double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+        
+        double sl    = PositionGetDouble(POSITION_SL);
+        
+        double tp    = PositionGetDouble(POSITION_TP);
+        
+        double cur = (type==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        
+        string pcomment = (string)PositionGetString(POSITION_COMMENT);
+        
+        bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
+        
+        
+        
+        // ======================= TIER 1: MAIN TREND FLIP (HIGHEST PRIORITY) =======================
+        
+        // If the main trend flips, close ALL positions (main, scalp, manual).
+        
+        int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
+        
+        if (main_st_dir != requiredDir)
+            
+        {
+            
+            if (Trade.PositionClose(ticket))
+                
+            {
+                
+                SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f",
+                                    
+                                    pcomment, tfstr(TF_Trade), cur));
+                
+            }
+            
+            continue; // Position is closed, move to the next one.
+            
+        }
+        
+        
+        
+        // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
+        
+        // If this is a scalp trade AND the scalp trend has flipped, close ONLY this scalp trade.
+        
+        if (isScalp && scalp_st_dir != requiredDir)
+            
+        {
+            
+            if (Trade.PositionClose(ticket))
+                
+            {
+                
+                SendTG(StringFormat("🛑 %s closed: SCALP TREND flipped on %s. Exit price %.2f",
+                                    
+                                    pcomment, tfstr(TF_Scalp), cur));
+                
+            }
+            
+            continue; // Position is closed, move to the next one.
+            
+        }
+        
+        
+        
+        // If a position is a scalp and Protect_Scalp_SLTP is on, skip all further management.
+        
+        if(Protect_Scalp_SLTP && isScalp) continue;
         
         // --- Breakeven (BE) & Protection Logic (Percentage Only) ---
         // Note: BE_Activation_TP_Percent must be > 0.0 to enable this block.
