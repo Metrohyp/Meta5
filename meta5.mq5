@@ -64,8 +64,8 @@ input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF
 
 // --- General Entry Filters ---
 input bool           Use_OverboughtOversold_Filter = true; // Block entries in extreme WPR zones.
-input double         WPR_Overbought_Level          = -20;  // Level above which buys are blocked.
-input double         WPR_Oversold_Level            = -80;  // Level below which sells are blocked.
+input double         WPR_Overbought_Level          = -15;  // Level above which buys are blocked.
+input double         WPR_Oversold_Level            = -85;  // Level below which sells are blocked.
 
 // --- Settings for HTF Divergence Filter (Directional Mode 1) ---
 input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H1;    // Timeframe to check for directional divergence.
@@ -137,6 +137,11 @@ input int            Lips_Period      = 5;
 input int            Lips_Shift       = 3;
 input double         AO_Min_Strength  = 3.0;
 input double         AO_Scalp_Min_Strength = 3;
+// --- NEW: Momentum Indicator Filter Settings ---
+input bool           Use_Momentum_Filter = true;   // true = require Momentum confirmation
+input int            Momentum_Period     = 14;   // Period for the Momentum indicator
+input double         Mom_Min_Strength    = 0.5;  // Required strength (distance from 100)
+input double         Mom_Scalp_Min_Strength = 0.3; // Required strength for scalps
 input bool           Use_WPR_Bias     = true;
 input bool           Use_WPR_Cross    = false;
 
@@ -289,6 +294,20 @@ string URLEncode(const string s)
 }
 //======================== Indicator Helpers =========================
 
+// Get Momentum value (oscillates around 100)
+double MomentumValue(ENUM_TIMEFRAMES tf, int shift=1)
+{
+    int h = iMomentum(_Symbol, tf, Momentum_Period, PRICE_CLOSE);
+    if(h==INVALID_HANDLE) return 100.0;
+    double mom[];
+    ArraySetAsSeries(mom,true);
+    if(CopyBuffer(h,0,0,shift+3,mom)<=shift){ IndicatorRelease(h); return 100.0; }
+    double v = mom[shift];
+    IndicatorRelease(h);
+    return v;
+}
+
+// WPR value ([-100..0]) -> e.g. -20, -50, -80
 // ADD THIS MISSING FUNCTION
 int GetHTFDivergenceDirection(ENUM_TIMEFRAMES tf, int lookbackBars)
 {
@@ -338,22 +357,48 @@ int GetHTFDivergenceDirection(ENUM_TIMEFRAMES tf, int lookbackBars)
     return 0; // No divergence
 }
 
-// Function 1: Detects divergence for proactive EXITS
+// Function 1: Detects divergence for proactive EXITS (Checks BOTH AO and Momentum)
 bool CheckMomentumDivergence(long tradeType, int lookbackBars, ENUM_TIMEFRAMES tf)
 {
     if(lookbackBars < 2) return false;
+
+    // --- Get Price Data ---
     MqlRates prices[];
     if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return false;
+    ArraySetAsSeries(prices, true);
+
+    // --- Get Awesome Oscillator (AO) Data ---
     int hAO = iAO(_Symbol, tf);
     if(hAO == INVALID_HANDLE) return false;
     double ao_buffer[];
-    if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return false; }
-    ArraySetAsSeries(prices, true);
+    if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars)
+    {
+        IndicatorRelease(hAO);
+        return false;
+    }
     ArraySetAsSeries(ao_buffer, true);
+
+    // --- NEW: Get Momentum Indicator Data ---
+    int hMom = iMomentum(_Symbol, tf, Momentum_Period, PRICE_CLOSE);
+    if(hMom == INVALID_HANDLE)
+    {
+        IndicatorRelease(hAO);
+        return false;
+    }
+    double mom_buffer[];
+    if(CopyBuffer(hMom, 0, 0, lookbackBars, mom_buffer) < lookbackBars)
+    {
+        IndicatorRelease(hAO);
+        IndicatorRelease(hMom);
+        return false;
+    }
+    ArraySetAsSeries(mom_buffer, true);
     
+    // --- Check for Divergence ---
     if(tradeType == POSITION_TYPE_BUY) // Look for BEARISH divergence to exit a BUY
     {
-        int highest_high_index = -1; double highest_high_price = 0;
+        int highest_high_index = -1;
+        double highest_high_price = 0;
         for(int i = 1; i < lookbackBars; i++) {
             if(prices[i].high > highest_high_price) {
                 highest_high_price = prices[i].high;
@@ -361,18 +406,23 @@ bool CheckMomentumDivergence(long tradeType, int lookbackBars, ENUM_TIMEFRAMES t
             }
         }
         if(highest_high_index != -1) {
-            // Condition 1: Current high is higher than the previous highest high.
             bool price_makes_new_high = (prices[0].high > highest_high_price);
-            // Condition 2: Current AO is lower than the AO at the previous highest high.
-            bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
-            if(price_makes_new_high && momentum_is_lower) {
-                IndicatorRelease(hAO); return true; // Bearish divergence detected!
+            
+            // --- UPDATED: Check both indicators ---
+            bool ao_momentum_is_lower  = (ao_buffer[0] < ao_buffer[highest_high_index]);
+            bool mom_momentum_is_lower = (mom_buffer[0] < mom_buffer[highest_high_index]);
+            
+            if(price_makes_new_high && (ao_momentum_is_lower || mom_momentum_is_lower)) {
+                IndicatorRelease(hAO);
+                IndicatorRelease(hMom);
+                return true; // Bearish divergence detected on AO or Momentum!
             }
         }
     }
     else // Look for BULLISH divergence to exit a SELL
     {
-        int lowest_low_index = -1; double lowest_low_price = 9999999;
+        int lowest_low_index = -1;
+        double lowest_low_price = 9999999;
         for(int i = 1; i < lookbackBars; i++) {
             if(prices[i].low < lowest_low_price) {
                 lowest_low_price = prices[i].low;
@@ -380,16 +430,23 @@ bool CheckMomentumDivergence(long tradeType, int lookbackBars, ENUM_TIMEFRAMES t
             }
         }
         if(lowest_low_index != -1) {
-            // Condition 1: Current low is lower than the previous lowest low.
             bool price_makes_new_low = (prices[0].low < lowest_low_price);
-            // Condition 2: Current AO is higher than the AO at the previous lowest low.
-            bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
-            if(price_makes_new_low && momentum_is_higher) {
-                IndicatorRelease(hAO); return true; // Bullish divergence detected!
+            
+            // --- UPDATED: Check both indicators ---
+            bool ao_momentum_is_higher  = (ao_buffer[0] > ao_buffer[lowest_low_index]);
+            bool mom_momentum_is_higher = (mom_buffer[0] > mom_buffer[lowest_low_index]);
+            
+            if(price_makes_new_low && (ao_momentum_is_higher || mom_momentum_is_higher)) {
+                IndicatorRelease(hAO);
+                IndicatorRelease(hMom);
+                return true; // Bullish divergence detected on AO or Momentum!
             }
         }
     }
+
+    // --- Release all handles ---
     IndicatorRelease(hAO);
+    IndicatorRelease(hMom);
     return false;
 }
 
@@ -1412,6 +1469,7 @@ void TryScalpEntries()
     if(!CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, stLineScalp, dirScalp)) return;
     int ag = AlligatorState(TF_Scalp,1);
     double ao = AOValue(TF_Scalp,1);
+    double mom = MomentumValue(TF_Scalp,1); // <-- ADD THIS
     double c  = iClose(_Symbol, TF_Scalp, 1);
     
     // --- Get Main Trend Flip State for IsCleanBreakout logic ---
@@ -1436,9 +1494,11 @@ void TryScalpEntries()
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
     bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-    bool buyCond  = buySignal && (ag > 0 && aoBuyOK);
-    bool sellCond = sellSignal && (ag < 0 && aoSellOK);
-    
+    // --- NEW: Momentum Indicator Filter ---
+        bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+        bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+    bool buyCond  = buySignal && (ag > 0 && aoBuyOK && momBuyOK);   // <-- UPDATED
+    bool sellCond = sellSignal && (ag < 0 && aoSellOK && momSellOK); // <-- UPDATED
     // --- IsCleanBreakout Filter for Scalp ---
     if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
     {
@@ -1740,6 +1800,7 @@ void TryEntries()
     
     int    ag = AlligatorState(TF_Trade,1);
     double ao = AOValue(TF_Trade,1);
+    double mom = MomentumValue(TF_Trade,1);
     double w  = WPRValue(TF_Trade,1);
     double c  = iClose(_Symbol, TF_Trade, 1);
     
@@ -1796,14 +1857,17 @@ void TryEntries()
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
     bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength);
+    // --- NEW: Momentum Indicator Filter ---
+        bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
+        bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
     // REMOVED DUPLICATE wBuyOK and wSellOK declarations here
     if(Use_OverboughtOversold_Filter)
     {
         if (w > WPR_Overbought_Level) wBuyOK = false;
         if (w < WPR_Oversold_Level) wSellOK = false;
     }
-    bool buyCond  = buySignal && (ag > 0 && aoBuyOK && wBuyOK && hOK);
-    bool sellCond = sellSignal && (ag < 0 && aoSellOK && wSellOK && hOK);
+    bool buyCond  = buySignal && (ag > 0 && aoBuyOK && wBuyOK && hOK && momBuyOK);   // <-- UPDATED
+    bool sellCond = sellSignal && (ag < 0 && aoSellOK && wSellOK && hOK && momSellOK); // <-- UPDATED
     
     // --- IsCleanBreakout Filter ---
     if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
@@ -1999,9 +2063,8 @@ void TryEntries()
             }
             
             // --- Send
-            SendTG(StringFormat("📈 <b>BUY Setup</b> %s %s\nST:%s  Alligator:bull  AO:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
-                                _Symbol, tfstr(TF_Trade), "UP", ao, w, entry, sl, tp));
-            
+            SendTG(StringFormat("📈 <b>BUY Setup</b> %s %s\nST:%s  Alligator:bull  AO:%.2f  Mom:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
+                                            _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
             if(Auto_Trade)
             {
                 Trade.SetExpertMagicNumber(Magic);
@@ -2141,9 +2204,8 @@ void TryEntries()
             }
             
             // --- Send
-            SendTG(StringFormat("📉 <b>SELL Setup</b> %s %s\nST:%s  Alligator:bear  AO:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
-                                _Symbol, tfstr(TF_Trade), "DOWN", ao, w, entry, sl, tp));
-            
+            SendTG(StringFormat("📉 <b>SELL Setup</b> %s %s\nST:%s  Alligator:bear  AO:%.2f  Mom:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
+                                            _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
             if(Auto_Trade)
             {
                 Trade.SetExpertMagicNumber(Magic);
