@@ -21,7 +21,7 @@ CTrade Trade;
 input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place trades, false = signals only
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
+input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
 input string          TG_CHAT_ID           = "394044850";
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
@@ -68,7 +68,7 @@ input double         WPR_Overbought_Level          = -20;  // Level above which 
 input double         WPR_Oversold_Level            = -80;  // Level below which sells are blocked.
 
 // --- Settings for HTF Divergence Filter (Directional Mode 1) ---
-input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H4;    // Timeframe to check for directional divergence.
+input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H1;    // Timeframe to check for directional divergence.
 
 // --- Proactive & Emergency Exits ---
 input bool           Use_Momentum_Exit_Filter = true; // If true, exits on signs of trend exhaustion (divergence).
@@ -86,7 +86,7 @@ input bool           Use_HalfStep_Trailing = false;  // Alternative trail: SL mo
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
-input double         BE_Activation_TP_Percent = 30.0; // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
 
 // --- Emergency Exit ---
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -1707,9 +1707,6 @@ void TryEntries()
     bool wBuyOK  = !Use_WPR_Bias || (w > -50.0);
     bool wSellOK = !Use_WPR_Bias || (w < -50.0);
     if(Use_WPR_Cross)
-    {
-        double wPrev = WPRValue(TF_Trade,2);
-    }
     
     // --- Detect fresh ST flip and reset all state variables ---
     if(dirM15 != 0 && dirM15 != prevDir_ST)
@@ -2219,31 +2216,23 @@ void ManageOpenPositions()
         
         bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
         
-        
+        // ======================= ADD THIS LINE BACK =======================
+                int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
+                // ==================================================================
         
         // ======================= TIER 1: MAIN TREND FLIP (HIGHEST PRIORITY) =======================
-        
-        // If the main trend flips, close ALL positions (main, scalp, manual).
-        
-        int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
-        
-        if (main_st_dir != requiredDir)
-            
-        {
-            
-            if (Trade.PositionClose(ticket))
                 
-            {
-                
-                SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f",
-                                    
-                                    pcomment, tfstr(TF_Trade), cur));
-                
-            }
-            
-            continue; // Position is closed, move to the next one.
-            
-        }
+                // If the main trend flips, close ALL positions (main, scalp, manual).
+                // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;  // <-- COMMENTED OUT
+                // if (main_st_dir != requiredDir)                          // <-- COMMENTED OUT
+                // {                                                         // <-- COMMENTED OUT
+                //    if (Trade.PositionClose(ticket))                       // <-- COMMENTED OUT
+                //    {                                                      // <-- COMMENTED OUT
+                //       SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f", // <-- COMMENTED OUT
+                //                           pcomment, tfstr(TF_Trade), cur)); // <-- COMMENTED OUT
+                //    }                                                      // <-- COMMENTED OUT
+                //    continue; // Position is closed, move to the next one. // <-- COMMENTED OUT
+                // }                                                         // <-- COMMENTED OUT
         
         
         
@@ -2703,7 +2692,6 @@ void OnTick()
     {
         lastBarTime = currentBarTime;
         ManagePendingOrders();
-        ManageRetraceLimitOrders(); // <-- ADD THIS LINE
         // Check for main strategy entries.
         TryEntries();
         
@@ -2718,7 +2706,7 @@ void OnTick()
                 TryScalpEntries();
             }
         }
-        
+        ManageRetraceLimitOrders(); // <-- ADD THIS LINE
         // Manage all other per-bar tasks
         TouchUpManualInitial();
         ManageOpenPositions();
