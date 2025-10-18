@@ -76,7 +76,9 @@ input int            Divergence_Lookback_Bars = 25;   // How many bars to check 
 //================================================================================
 //                 --- TRADE MANAGEMENT & EXITS ---
 //================================================================================
-// Controls how trades are managed after they are opened.
+
+// --- NEW: Momentum Cooldown After Win ---
+input int Cooldown_Momentum_Bars = 5; // momentum after a win, How many bars to check only.
 
 // --- Trailing Stops ---
 input bool           Use_ATR_Trailing   = true;    // Dynamic SL that follows price based on volatility.
@@ -86,7 +88,7 @@ input bool           Use_HalfStep_Trailing = false;  // Alternative trail: SL mo
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
-input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Activation_TP_Percent = 10.0; // Move SL to BE when trade is X% of the way to TP.
 
 // --- Emergency Exit ---
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -219,7 +221,9 @@ datetime g_lastMonthlyReportSent = 0;
 datetime g_eaStartTime;
 bool g_trailingActivated = false; // NEW: Flag to track if BE or Trailing has started
 bool g_breakoutConfirmed = false; // NEW: Flag to track if a clean breakout is confirmed for the current trend
-
+// NEW: Flags for Momentum Cooldown
+bool     g_momentumCooldownActive = false;
+datetime g_cooldownStartTime      = 0;
 //============================== Utils ===============================
 string tfstr(ENUM_TIMEFRAMES tf)
 {
@@ -288,160 +292,160 @@ string URLEncode(const string s)
 // ADD THIS MISSING FUNCTION
 int GetHTFDivergenceDirection(ENUM_TIMEFRAMES tf, int lookbackBars)
 {
-   if(lookbackBars < 2) return 0;
-   MqlRates prices[];
-   if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return 0;
-   int hAO = iAO(_Symbol, tf);
-   if(hAO == INVALID_HANDLE) return 0;
-   double ao_buffer[];
-   if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return 0; }
-   ArraySetAsSeries(prices, true);
-   ArraySetAsSeries(ao_buffer, true);
-
-   // Check for bullish divergence (potential BUY)
-   int lowest_low_index = -1; double lowest_low_price = 9999999;
-   for(int i = 1; i < lookbackBars; i++) {
-      if(prices[i].low < lowest_low_price) {
-         lowest_low_price = prices[i].low;
-         lowest_low_index = i;
-      }
-   }
-   if(lowest_low_index != -1) {
-      bool price_makes_new_low = (prices[0].low < lowest_low_price);
-      bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
-      if(price_makes_new_low && momentum_is_higher) {
-         IndicatorRelease(hAO); return -1; // Bullish divergence detected (potential buy)
-      }
-   }
-
-   // Check for bearish divergence (potential SELL)
-   int highest_high_index = -1; double highest_high_price = 0;
-   for(int i = 1; i < lookbackBars; i++) {
-      if(prices[i].high > highest_high_price) {
-         highest_high_price = prices[i].high;
-         highest_high_index = i;
-      }
-   }
-   if(highest_high_index != -1) {
-      bool price_makes_new_high = (prices[0].high > highest_high_price);
-      bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
-      if(price_makes_new_high && momentum_is_lower) {
-         IndicatorRelease(hAO); return 1; // Bearish divergence detected (potential sell)
-      }
-   }
-   
-   IndicatorRelease(hAO);
-   return 0; // No divergence
+    if(lookbackBars < 2) return 0;
+    MqlRates prices[];
+    if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return 0;
+    int hAO = iAO(_Symbol, tf);
+    if(hAO == INVALID_HANDLE) return 0;
+    double ao_buffer[];
+    if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return 0; }
+    ArraySetAsSeries(prices, true);
+    ArraySetAsSeries(ao_buffer, true);
+    
+    // Check for bullish divergence (potential BUY)
+    int lowest_low_index = -1; double lowest_low_price = 9999999;
+    for(int i = 1; i < lookbackBars; i++) {
+        if(prices[i].low < lowest_low_price) {
+            lowest_low_price = prices[i].low;
+            lowest_low_index = i;
+        }
+    }
+    if(lowest_low_index != -1) {
+        bool price_makes_new_low = (prices[0].low < lowest_low_price);
+        bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
+        if(price_makes_new_low && momentum_is_higher) {
+            IndicatorRelease(hAO); return -1; // Bullish divergence detected (potential buy)
+        }
+    }
+    
+    // Check for bearish divergence (potential SELL)
+    int highest_high_index = -1; double highest_high_price = 0;
+    for(int i = 1; i < lookbackBars; i++) {
+        if(prices[i].high > highest_high_price) {
+            highest_high_price = prices[i].high;
+            highest_high_index = i;
+        }
+    }
+    if(highest_high_index != -1) {
+        bool price_makes_new_high = (prices[0].high > highest_high_price);
+        bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
+        if(price_makes_new_high && momentum_is_lower) {
+            IndicatorRelease(hAO); return 1; // Bearish divergence detected (potential sell)
+        }
+    }
+    
+    IndicatorRelease(hAO);
+    return 0; // No divergence
 }
 
 // Function 1: Detects divergence for proactive EXITS
 bool CheckMomentumDivergence(long tradeType, int lookbackBars, ENUM_TIMEFRAMES tf)
 {
-   if(lookbackBars < 2) return false;
-   MqlRates prices[];
-   if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return false;
-   int hAO = iAO(_Symbol, tf);
-   if(hAO == INVALID_HANDLE) return false;
-   double ao_buffer[];
-   if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return false; }
-   ArraySetAsSeries(prices, true);
-   ArraySetAsSeries(ao_buffer, true);
-
-   if(tradeType == POSITION_TYPE_BUY) // Look for BEARISH divergence to exit a BUY
-   {
-      int highest_high_index = -1; double highest_high_price = 0;
-      for(int i = 1; i < lookbackBars; i++) {
-         if(prices[i].high > highest_high_price) {
-            highest_high_price = prices[i].high;
-            highest_high_index = i;
-         }
-      }
-      if(highest_high_index != -1) {
-         // Condition 1: Current high is higher than the previous highest high.
-         bool price_makes_new_high = (prices[0].high > highest_high_price);
-         // Condition 2: Current AO is lower than the AO at the previous highest high.
-         bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
-         if(price_makes_new_high && momentum_is_lower) {
-            IndicatorRelease(hAO); return true; // Bearish divergence detected!
-         }
-      }
-   }
-   else // Look for BULLISH divergence to exit a SELL
-   {
-      int lowest_low_index = -1; double lowest_low_price = 9999999;
-      for(int i = 1; i < lookbackBars; i++) {
-         if(prices[i].low < lowest_low_price) {
-            lowest_low_price = prices[i].low;
-            lowest_low_index = i;
-         }
-      }
-      if(lowest_low_index != -1) {
-         // Condition 1: Current low is lower than the previous lowest low.
-         bool price_makes_new_low = (prices[0].low < lowest_low_price);
-         // Condition 2: Current AO is higher than the AO at the previous lowest low.
-         bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
-         if(price_makes_new_low && momentum_is_higher) {
-            IndicatorRelease(hAO); return true; // Bullish divergence detected!
-         }
-      }
-   }
-   IndicatorRelease(hAO);
-   return false;
+    if(lookbackBars < 2) return false;
+    MqlRates prices[];
+    if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return false;
+    int hAO = iAO(_Symbol, tf);
+    if(hAO == INVALID_HANDLE) return false;
+    double ao_buffer[];
+    if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return false; }
+    ArraySetAsSeries(prices, true);
+    ArraySetAsSeries(ao_buffer, true);
+    
+    if(tradeType == POSITION_TYPE_BUY) // Look for BEARISH divergence to exit a BUY
+    {
+        int highest_high_index = -1; double highest_high_price = 0;
+        for(int i = 1; i < lookbackBars; i++) {
+            if(prices[i].high > highest_high_price) {
+                highest_high_price = prices[i].high;
+                highest_high_index = i;
+            }
+        }
+        if(highest_high_index != -1) {
+            // Condition 1: Current high is higher than the previous highest high.
+            bool price_makes_new_high = (prices[0].high > highest_high_price);
+            // Condition 2: Current AO is lower than the AO at the previous highest high.
+            bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
+            if(price_makes_new_high && momentum_is_lower) {
+                IndicatorRelease(hAO); return true; // Bearish divergence detected!
+            }
+        }
+    }
+    else // Look for BULLISH divergence to exit a SELL
+    {
+        int lowest_low_index = -1; double lowest_low_price = 9999999;
+        for(int i = 1; i < lookbackBars; i++) {
+            if(prices[i].low < lowest_low_price) {
+                lowest_low_price = prices[i].low;
+                lowest_low_index = i;
+            }
+        }
+        if(lowest_low_index != -1) {
+            // Condition 1: Current low is lower than the previous lowest low.
+            bool price_makes_new_low = (prices[0].low < lowest_low_price);
+            // Condition 2: Current AO is higher than the AO at the previous lowest low.
+            bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
+            if(price_makes_new_low && momentum_is_higher) {
+                IndicatorRelease(hAO); return true; // Bullish divergence detected!
+            }
+        }
+    }
+    IndicatorRelease(hAO);
+    return false;
 }
 
 // Function 2: Detects divergence for reversal ENTRIES
 bool CheckDivergenceForEntry(long tradeType, int lookbackBars, ENUM_TIMEFRAMES tf)
 {
-   if(lookbackBars < 2) return false;
-   MqlRates prices[];
-   if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return false;
-   int hAO = iAO(_Symbol, tf);
-   if(hAO == INVALID_HANDLE) return false;
-   double ao_buffer[];
-   if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return false; }
-   ArraySetAsSeries(prices, true);
-   ArraySetAsSeries(ao_buffer, true);
-
-   if(tradeType == POSITION_TYPE_BUY) // Look for BULLISH divergence for a BUY ENTRY
-   {
-      int lowest_low_index = -1; double lowest_low_price = 9999999;
-      for(int i = 1; i < lookbackBars; i++) {
-         if(prices[i].low < lowest_low_price) {
-            lowest_low_price = prices[i].low;
-            lowest_low_index = i;
-         }
-      }
-      if(lowest_low_index != -1) {
-         // Condition 1: Price makes a new lower low.
-         bool price_makes_new_low = (prices[0].low < lowest_low_price);
-         // Condition 2: AO makes a higher low.
-         bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
-         if(price_makes_new_low && momentum_is_higher) {
-            IndicatorRelease(hAO); return true; // Bullish divergence detected!
-         }
-      }
-   }
-   else // Look for BEARISH divergence for a SELL ENTRY
-   {
-      int highest_high_index = -1; double highest_high_price = 0;
-      for(int i = 1; i < lookbackBars; i++) {
-         if(prices[i].high > highest_high_price) {
-            highest_high_price = prices[i].high;
-            highest_high_index = i;
-         }
-      }
-      if(highest_high_index != -1) {
-         // Condition 1: Price makes a new higher high.
-         bool price_makes_new_high = (prices[0].high > highest_high_price);
-         // Condition 2: AO makes a lower high.
-         bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
-         if(price_makes_new_high && momentum_is_lower) {
-            IndicatorRelease(hAO); return true; // Bearish divergence detected!
-         }
-      }
-   }
-   IndicatorRelease(hAO);
-   return false;
+    if(lookbackBars < 2) return false;
+    MqlRates prices[];
+    if(CopyRates(_Symbol, tf, 0, lookbackBars, prices) < lookbackBars) return false;
+    int hAO = iAO(_Symbol, tf);
+    if(hAO == INVALID_HANDLE) return false;
+    double ao_buffer[];
+    if(CopyBuffer(hAO, 0, 0, lookbackBars, ao_buffer) < lookbackBars) { IndicatorRelease(hAO); return false; }
+    ArraySetAsSeries(prices, true);
+    ArraySetAsSeries(ao_buffer, true);
+    
+    if(tradeType == POSITION_TYPE_BUY) // Look for BULLISH divergence for a BUY ENTRY
+    {
+        int lowest_low_index = -1; double lowest_low_price = 9999999;
+        for(int i = 1; i < lookbackBars; i++) {
+            if(prices[i].low < lowest_low_price) {
+                lowest_low_price = prices[i].low;
+                lowest_low_index = i;
+            }
+        }
+        if(lowest_low_index != -1) {
+            // Condition 1: Price makes a new lower low.
+            bool price_makes_new_low = (prices[0].low < lowest_low_price);
+            // Condition 2: AO makes a higher low.
+            bool momentum_is_higher = (ao_buffer[0] > ao_buffer[lowest_low_index]);
+            if(price_makes_new_low && momentum_is_higher) {
+                IndicatorRelease(hAO); return true; // Bullish divergence detected!
+            }
+        }
+    }
+    else // Look for BEARISH divergence for a SELL ENTRY
+    {
+        int highest_high_index = -1; double highest_high_price = 0;
+        for(int i = 1; i < lookbackBars; i++) {
+            if(prices[i].high > highest_high_price) {
+                highest_high_price = prices[i].high;
+                highest_high_index = i;
+            }
+        }
+        if(highest_high_index != -1) {
+            // Condition 1: Price makes a new higher high.
+            bool price_makes_new_high = (prices[0].high > highest_high_price);
+            // Condition 2: AO makes a lower high.
+            bool momentum_is_lower = (ao_buffer[0] < ao_buffer[highest_high_index]);
+            if(price_makes_new_high && momentum_is_lower) {
+                IndicatorRelease(hAO); return true; // Bearish divergence detected!
+            }
+        }
+    }
+    IndicatorRelease(hAO);
+    return false;
 }
 
 // UPGRADED FUNCTION: Adds a limit order at a calculated SuperTrend retest point.
@@ -1379,57 +1383,77 @@ int CountPendingThisEA()
 // ====================== FINAL CORRECTED TryScalpEntries() FUNCTION ======================
 void TryScalpEntries()
 {
-   if(!Use_Scalp_Mode) return;
-   if(Scalp_Only_When_No_Main && CountOpen()>0) return;
-   if(CountOpenByCommentSubstr("V25 Scalp") >= Scalp_Max_Concurrent) return;
-
-   // --- Get Core Indicator Data for Scalp ---
-   double stLineScalp=0; int dirScalp=0;
-   if(!CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, stLineScalp, dirScalp)) return;
-   int ag = AlligatorState(TF_Scalp,1);
-   double ao = AOValue(TF_Scalp,1);
-   double c  = iClose(_Symbol, TF_Scalp, 1);
-   
-   // --- Get Main Trend Flip State for IsCleanBreakout logic ---
-   double mainSTLine_ignored=0; int mainSTDir=0;
-   if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, mainSTLine_ignored, mainSTDir)) return;
-   bool isTrendFlip = (mainSTDir != 0 && mainSTDir != prevDir_ST);
-
-   // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-   bool buySignal = false;
-   bool sellSignal = false;
-   if(Entry_Mode == 0 || Entry_Mode == 2) // Trend-Following
-   {
-      if (dirScalp > 0 && c > stLineScalp) buySignal = true;
-      if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
-   }
-   if(Entry_Mode == 1 || Entry_Mode == 2) // Reversal (Divergence)
-   {
-      if(CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp)) buySignal = true;
-      if(CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp)) sellSignal = true;
-   }
-   
-   // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
-   bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-   bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-   bool buyCond  = buySignal && (ag > 0 && aoBuyOK);
-   bool sellCond = sellSignal && (ag < 0 && aoSellOK);
-   
-   // --- IsCleanBreakout Filter for Scalp ---
-   if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
-   {
-      if (buyCond && (Entry_Mode == 0 || Entry_Mode == 2))
-      {
-         if(IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp)) g_breakoutConfirmed = true;
-         else buyCond = false;
-      }
-      if (sellCond && (Entry_Mode == 0 || Entry_Mode == 2))
-      {
-         if(IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp)) g_breakoutConfirmed = true;
-         else sellCond = false;
-      }
-   }
-
+    if(!Use_Scalp_Mode) return;
+    if(Scalp_Only_When_No_Main && CountOpen()>0) return;
+    if(CountOpenByCommentSubstr("V25 Scalp") >= Scalp_Max_Concurrent) return;
+    // --- NEW: Check Momentum Cooldown Status ---
+    bool isCooldownActive = false;
+    int  currentEntryMode = Entry_Mode; // Use the user's setting by default
+    
+    if (g_momentumCooldownActive)
+    {
+        datetime barTime = iTime(_Symbol, TF_Scalp, 0); // Use scalp timeframe
+        long barsPassed = (barTime - g_cooldownStartTime) / PeriodSeconds(TF_Scalp);
+        if (barsPassed >= Cooldown_Momentum_Bars)
+        {
+            g_momentumCooldownActive = false; // Cooldown expired
+            // (No TG alert here, let the main function handle it)
+        }
+        else
+        {
+            isCooldownActive = true;
+            currentEntryMode = 1; // Force Reversal (Divergence) mode
+        }
+    }
+    // --- End of New Block ---
+    
+    // --- Get Core Indicator Data for Scalp ---
+    double stLineScalp=0; int dirScalp=0;
+    if(!CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, stLineScalp, dirScalp)) return;
+    int ag = AlligatorState(TF_Scalp,1);
+    double ao = AOValue(TF_Scalp,1);
+    double c  = iClose(_Symbol, TF_Scalp, 1);
+    
+    // --- Get Main Trend Flip State for IsCleanBreakout logic ---
+    double mainSTLine_ignored=0; int mainSTDir=0;
+    if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, mainSTLine_ignored, mainSTDir)) return;
+    bool isTrendFlip = (mainSTDir != 0 && mainSTDir != prevDir_ST);
+    
+    // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
+    bool buySignal = false;
+    bool sellSignal = false;
+    if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following
+    {
+        if (dirScalp > 0 && c > stLineScalp) buySignal = true;
+        if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
+    }
+    if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence)
+    {
+        if(CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp)) buySignal = true;
+        if(CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp)) sellSignal = true;
+    }
+    
+    // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
+    bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
+    bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
+    bool buyCond  = buySignal && (ag > 0 && aoBuyOK);
+    bool sellCond = sellSignal && (ag < 0 && aoSellOK);
+    
+    // --- IsCleanBreakout Filter for Scalp ---
+    if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
+    {
+        if (buyCond && (currentEntryMode == 0 || currentEntryMode == 2))
+        {
+            if(IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp)) g_breakoutConfirmed = true;
+            else buyCond = false;
+        }
+        if (sellCond && (currentEntryMode == 0 || currentEntryMode == 2))
+        {
+            if(IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp)) g_breakoutConfirmed = true;
+            else sellCond = false;
+        }
+    }
+    
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER based on Directional_Filter_Mode =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter)
     {
@@ -1463,15 +1487,15 @@ void TryScalpEntries()
             sellCond = false;
         }
     }
-   else if (Directional_Filter_Mode == 1)
-   {
-      int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
-      if (htfDivergenceBias > 0) sellCond = false;
-      if (htfDivergenceBias < 0) buyCond = false;
-   }
-   
-   if (!buyCond && !sellCond) return;
-
+    else if (Directional_Filter_Mode == 1)
+    {
+        int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
+        if (htfDivergenceBias > 0) sellCond = false;
+        if (htfDivergenceBias < 0) buyCond = false;
+    }
+    
+    if (!buyCond && !sellCond) return;
+    
     // ---- ATR on scalp TF
     int hATR = iATR(_Symbol, TF_Scalp, Scalp_ATR_Period);
     double atr=0.0;
@@ -1565,36 +1589,36 @@ void TryScalpEntries()
     }
     
     // =================== START: CORRECTED TRADE EXECUTION ===================
-
+    
     // Define risk percentage
     double rp = (Risk_Percent_Scalp > 0) ? Risk_Percent_Scalp : Risk_Percent;
-
+    
     // Final safety (SanitizeStops ensures compliance with broker stop levels)
     { double ssl=sl, stp=tp; SanitizeStops(buy?POSITION_TYPE_BUY:POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
-
+    
     // --- Apply TP Pullback ---
     if(TP_Pullback_ATR_Mult > 0 && tp > 0)
     {
         if(buy) tp = tp - (TP_Pullback_ATR_Mult * atr);
         else    tp = tp + (TP_Pullback_ATR_Mult * atr);
     }
-
+    
     if( (buy && (entry - sl) <= 0) || (!buy && (sl - entry) <= 0) ) return;
-
+    
     // --- HYBRID ENTRY LOGIC ---
     double jaw, teeth, lips;
     if (!GetAlligatorLines(TF_Scalp, 1, jaw, teeth, lips)) return;
     double idealEntry = lips; // Ideal entry is the Alligator Lips line
-
+    
     // Define the market entry zone
     double zone = Scalp_Market_Entry_ATR_Zone * atr;
     bool inMarketZone = buy ? (entry <= idealEntry + zone) : (entry >= idealEntry - zone);
-
+    
     string entryType = "";
     double entryPrice = 0.0;
     double finalSL = sl;
     double finalTP = tp;
-
+    
     if(Scalp_Market_Entry_ATR_Zone > 0 && inMarketZone)
     {
         // --- Decision: Enter at MARKET ---
@@ -1618,15 +1642,15 @@ void TryScalpEntries()
         
         SanitizeStops(buy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, finalSL, finalTP);
     }
-
+    
     // --- Lot Sizing (based on the determined entry price) ---
     double riskPtsForLots = buy ? (entryPrice - finalSL) / _Point : (finalSL - entryPrice) / _Point;
     if (riskPtsForLots <= MinStopPoints()) return; // Risk is too small or invalid
-
+    
     bool   useFixedLot = Scalp_Use_Fixed_Lot;
     double fixedLots   = (Fixed_Lots_Scalp > 0.0 ? Fixed_Lots_Scalp : Fixed_Lots);
     double lots = useFixedLot ? NormalizeVolume(fixedLots) : LotsByRisk(rp, riskPtsForLots);
-        
+    
     string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
     string signalMsg = StringFormat(
                                     "<b>%s</b> (%s)\n\n"
@@ -1641,7 +1665,7 @@ void TryScalpEntries()
                                     DoubleToString(entryPrice, _Digits)
                                     );
     SendTG(signalMsg);
-
+    
     if (Auto_Trade)
     {
         bool sent = false; // Initialize sent variable
@@ -1684,7 +1708,25 @@ void TryEntries()
     
     // Cooldown after last trade bar (legacy guard)
     if(lastTradeBarTime == barTime) return;
+    // --- NEW: Check Momentum Cooldown Status ---
+    bool isCooldownActive = false;
+    int  currentEntryMode = Entry_Mode; // Use the user's setting by default
     
+    if (g_momentumCooldownActive)
+    {
+        long barsPassed = (barTime - g_cooldownStartTime) / PeriodSeconds(TF_Trade);
+        if (barsPassed >= Cooldown_Momentum_Bars)
+        {
+            g_momentumCooldownActive = false; // Cooldown expired
+            SendTG("ℹ️ Cooldown over. Resuming normal entry mode.");
+        }
+        else
+        {
+            isCooldownActive = true;
+            currentEntryMode = 1; // Force Reversal (Divergence) mode
+        }
+    }
+    // --- End of New Block ---
     // ================================ FILTERS ==============================
     double stLineM15=0, stLineH1=0, stLineH4=0;
     int    dirM15=0, dirH1=0, dirH4=0;
@@ -1707,18 +1749,27 @@ void TryEntries()
     bool wBuyOK  = !Use_WPR_Bias || (w > -50.0);
     bool wSellOK = !Use_WPR_Bias || (w < -50.0);
     if(Use_WPR_Cross)
-    
-    // --- Detect fresh ST flip and reset all state variables ---
-    if(dirM15 != 0 && dirM15 != prevDir_ST)
-    {
-        flipBar             = iTime(_Symbol, TF_Trade, 1);
-        stageCount          = 0;
-        g_breakoutConfirmed = false; // Reset the breakout confirmation flag on a new trend flip
-    }
+        
+        // --- Detect fresh ST flip and reset all state variables ---
+        if(dirM15 != 0 && dirM15 != prevDir_ST && prevDir_ST != 0)
+        {
+            flipBar             = iTime(_Symbol, TF_Trade, 1);
+            stageCount          = 0;
+            g_breakoutConfirmed = false; // Reset the breakout confirmation flag on a new trend flip
+            // --- NEW: Send Trend Flip Alert ---
+            string newTrend = (dirM15 > 0) ? "UP (Bullish)" : "DOWN (Bearish)";
+            string alertMsg = StringFormat("🔄 <b>TREND FLIP DETECTED</b>\n\n"
+                                           "📊 <b>Symbol:</b> %s\n"
+                                           "⏰ <b>Timeframe:</b> %s\n"
+                                           "⚡ <b>New Trend:</b> %s",
+                                           _Symbol, tfstr(TF_Trade), newTrend);
+            SendTG(alertMsg);
+            // --- End of New Alert ---
+        }
     prevDir_ST = dirM15;
     // In TryEntries() function - FIXED
     bool isTrendFlip = (dirM15 != 0 && dirM15 != prevDir_ST);
-
+    
     // --- Proper flip wait implementation ---
     bool flipWaitOK = true;
     if(isTrendFlip && Min_Bars_After_Flip > 0)
@@ -1729,18 +1780,18 @@ void TryEntries()
     }
     
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-       bool buySignal = false;
-       bool sellSignal = false;
-       if(Entry_Mode == 0 || Entry_Mode == 2) // Trend-Following
-       {
-          if (dirM15 > 0 && c > stLineM15) buySignal = true;
-          if (dirM15 < 0 && c < stLineM15) sellSignal = true;
-       }
-       if(Entry_Mode == 1 || Entry_Mode == 2) // Reversal (Divergence)
-       {
-          if(CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) buySignal = true;
-          if(CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) sellSignal = true;
-       }
+    bool buySignal = false;
+    bool sellSignal = false;
+    if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following
+    {
+        if (dirM15 > 0 && c > stLineM15) buySignal = true;
+        if (dirM15 < 0 && c < stLineM15) sellSignal = true;
+    }
+    if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence)
+    {
+        if(CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) buySignal = true;
+        if(CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) sellSignal = true;
+    }
     
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
@@ -1748,27 +1799,27 @@ void TryEntries()
     // REMOVED DUPLICATE wBuyOK and wSellOK declarations here
     if(Use_OverboughtOversold_Filter)
     {
-       if (w > WPR_Overbought_Level) wBuyOK = false;
-       if (w < WPR_Oversold_Level) wSellOK = false;
+        if (w > WPR_Overbought_Level) wBuyOK = false;
+        if (w < WPR_Oversold_Level) wSellOK = false;
     }
-       bool buyCond  = buySignal && (ag > 0 && aoBuyOK && wBuyOK && hOK);
-       bool sellCond = sellSignal && (ag < 0 && aoSellOK && wSellOK && hOK);
-
-       // --- IsCleanBreakout Filter ---
-       if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
-       {
-          if (buyCond && (Entry_Mode == 0 || Entry_Mode == 2))
-          {
-             if(IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade)) g_breakoutConfirmed = true;
-             else buyCond = false;
-          }
-          if (sellCond && (Entry_Mode == 0 || Entry_Mode == 2))
-          {
-             if(IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade)) g_breakoutConfirmed = true;
-             else sellCond = false;
-          }
-       }
-       
+    bool buyCond  = buySignal && (ag > 0 && aoBuyOK && wBuyOK && hOK);
+    bool sellCond = sellSignal && (ag < 0 && aoSellOK && wSellOK && hOK);
+    
+    // --- IsCleanBreakout Filter ---
+    if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed)
+    {
+        if (buyCond && (currentEntryMode == 0 || currentEntryMode == 2))
+        {
+            if(IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade)) g_breakoutConfirmed = true;
+            else buyCond = false;
+        }
+        if (sellCond && (currentEntryMode == 0 || currentEntryMode == 2))
+        {
+            if(IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade)) g_breakoutConfirmed = true;
+            else sellCond = false;
+        }
+    }
+    
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter)
     {
@@ -1819,14 +1870,14 @@ void TryEntries()
             sellCond = false;
         }
     }
-       else if (Directional_Filter_Mode == 1)
-       {
-          int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
-          if (htfDivergenceBias > 0) sellCond = false;
-          if (htfDivergenceBias < 0) buyCond = false;
-       }
-       
-       if (!buyCond && !sellCond) return;
+    else if (Directional_Filter_Mode == 1)
+    {
+        int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
+        if (htfDivergenceBias > 0) sellCond = false;
+        if (htfDivergenceBias < 0) buyCond = false;
+    }
+    
+    if (!buyCond && !sellCond) return;
     // One position at a time (per symbol/magic)
     if(One_Trade_At_A_Time && CountOpen()>0)
     {
@@ -1837,6 +1888,7 @@ void TryEntries()
                                         "📈 <b>Current Positions:</b> %d\n"
                                         "📉 <b>Max Allowed:</b> 1\n"
                                         "⚡ <b>Signal:</b> %s",
+                                        tfstr(TF_Trade),
                                         _Symbol,
                                         CountOpen(),
                                         buyCond ? "BUY" : (sellCond ? "SELL" : "N/A")
@@ -1932,9 +1984,9 @@ void TryEntries()
             // <<< BUG FIX: Add a sanity check to ensure TP is valid. >>>
             if (tp <= entry)
             {
-               SendTG(StringFormat("🚫 <b>BUY REJECTED</b>\n\n- Symbol: %s\n- Reason: Invalid TP (%.2f) calculated below entry (%.2f).",
-                                   _Symbol, tp, entry));
-               return; // Reject the trade
+                SendTG(StringFormat("🚫 <b>BUY REJECTED</b>\n\n- Symbol: %s\n- Reason: Invalid TP (%.2f) calculated below entry (%.2f).",
+                                    _Symbol, tp, entry));
+                return; // Reject the trade
             }
             
             // --- Optional retrace-or-breakout gate (micro TF)
@@ -2217,22 +2269,22 @@ void ManageOpenPositions()
         bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
         
         // ======================= ADD THIS LINE BACK =======================
-                int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
-                // ==================================================================
+        int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
+        // ==================================================================
         
         // ======================= TIER 1: MAIN TREND FLIP (HIGHEST PRIORITY) =======================
-                
-                // If the main trend flips, close ALL positions (main, scalp, manual).
-                // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;  // <-- COMMENTED OUT
-                // if (main_st_dir != requiredDir)                          // <-- COMMENTED OUT
-                // {                                                         // <-- COMMENTED OUT
-                //    if (Trade.PositionClose(ticket))                       // <-- COMMENTED OUT
-                //    {                                                      // <-- COMMENTED OUT
-                //       SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f", // <-- COMMENTED OUT
-                //                           pcomment, tfstr(TF_Trade), cur)); // <-- COMMENTED OUT
-                //    }                                                      // <-- COMMENTED OUT
-                //    continue; // Position is closed, move to the next one. // <-- COMMENTED OUT
-                // }                                                         // <-- COMMENTED OUT
+        
+        // If the main trend flips, close ALL positions (main, scalp, manual).
+        // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;  // <-- COMMENTED OUT
+        // if (main_st_dir != requiredDir)                          // <-- COMMENTED OUT
+        // {                                                         // <-- COMMENTED OUT
+        //    if (Trade.PositionClose(ticket))                       // <-- COMMENTED OUT
+        //    {                                                      // <-- COMMENTED OUT
+        //       SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f", // <-- COMMENTED OUT
+        //                           pcomment, tfstr(TF_Trade), cur)); // <-- COMMENTED OUT
+        //    }                                                      // <-- COMMENTED OUT
+        //    continue; // Position is closed, move to the next one. // <-- COMMENTED OUT
+        // }                                                         // <-- COMMENTED OUT
         
         
         
@@ -2265,7 +2317,7 @@ void ManageOpenPositions()
         if(Protect_Scalp_SLTP && isScalp) continue;
         
         // In ManageOpenPositions() function - ADD THIS BLOCK after trend flip checks
-
+        
         // ======================= MOMENTUM DIVERGENCE EXIT (TIER 1.5) =======================
         if(Use_Momentum_Exit_Filter && isEA) // Only for EA trades, not manual
         {
@@ -2843,6 +2895,15 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             double S    = HistoryDealGetDouble (deal, DEAL_SWAP);
             double net  = P + F + C + S;
             string cmt  = (string)HistoryDealGetString(deal, DEAL_COMMENT);
+            
+            // --- NEW: Activate Momentum Cooldown on Profit ---
+            if (net >= 0) // If trade was a win or break-even
+            {
+                g_momentumCooldownActive = true;
+                g_cooldownStartTime = TimeCurrent(); // Use current time for cooldown start
+                SendTG("ℹ️ Cooldown activated after profitable trade. Switching to reversal-only mode.");
+            }
+            // --- End of New Block ---
             
             // --- ERROR FIX: Declare entryPrice here so it's available for the alert message ---
             double entryPrice = 0.0;
