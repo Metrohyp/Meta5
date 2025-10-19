@@ -35,11 +35,11 @@ input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 2;      // if >0, overrides and uses this absolute % just for scalps
+input double         Risk_Percent_Scalp = 1;      // if >0, overrides and uses this absolute % just for scalps
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
-input int            HTF_Filter_Mode = 2;              // 0=Trend Align, 1=Breakout, 2=BOTH (Trend AND Breakout)
+input int            HTF_Filter_Mode = 1;              // 0=Trend Align, 1=Breakout, 2=BOTH (Trend AND Breakout)
 input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;    // Timeframe for the filter.
 
 input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
@@ -60,15 +60,16 @@ input bool    Use_HTF_Filter            = true;                    // enable HTF
 
 // --- Master Strategy Selection ---
 input int            Entry_Mode = 2; // 0=Trend-Following, 1=Reversal (Divergence), 2=BOTH
-input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF Divergence
+input int            Directional_Filter_Mode = 1; // 0=HTF Trend/Breakout, 1=HTF Divergence
+
+// --- Settings for HTF Divergence Filter (Directional Mode 1) ---
+input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_M4;    // Timeframe to check for directional divergence.
+input ENUM_TIMEFRAMES TF_Scalp_HTF_Divergence = PERIOD_H1; // HTF Divergence filter just for scalps
 
 // --- General Entry Filters ---
 input bool           Use_OverboughtOversold_Filter = true; // Block entries in extreme WPR zones.
 input double         WPR_Overbought_Level          = -15;  // Level above which buys are blocked.
-input double         WPR_Oversold_Level            = -85;  // Level below which sells are blocked.
-
-// --- Settings for HTF Divergence Filter (Directional Mode 1) ---
-input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H1;    // Timeframe to check for directional divergence.
+input double         WPR_Oversold_Level            = -90;  // Level below which sells are blocked.
 
 // --- Proactive & Emergency Exits ---
 input bool           Use_Momentum_Exit_Filter = true; // If true, exits on signs of trend exhaustion (divergence).
@@ -88,7 +89,7 @@ input bool           Use_HalfStep_Trailing = false;  // Alternative trail: SL mo
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
-input double         BE_Activation_TP_Percent = 10.0; // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Activation_TP_Percent = 15.0; // Move SL to BE when trade is X% of the way to TP.
 
 // --- Emergency Exit ---
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -190,7 +191,7 @@ input double         HTF_Breakout_ATR_Margin = 0.25;
 input int            HTF_Breakout_Mode  = 0;
 input int            HTF_Breakout_MaxAgeBars = 3;
 input double         Retest_ATR_Tolerance = 0.25;
-input double         AddEntry_Trigger_Ratio = 1;
+input double         AddEntry_Trigger_Ratio = 0.2;
 input bool           Adjust_All_To_Latest = true;
 input int            Min_Bars_After_Flip = 1;
 input double         Confirm_Close_Dist_ATR = 0.20;
@@ -1548,11 +1549,12 @@ void TryScalpEntries()
         }
     }
     else if (Directional_Filter_Mode == 1)
-    {
-        int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
-        if (htfDivergenceBias > 0) sellCond = false;
-        if (htfDivergenceBias < 0) buyCond = false;
-    }
+        {
+            // --- MODIFIED: Use the new scalp-specific HTF divergence TF ---
+            int htfDivergenceBias = GetHTFDivergenceDirection(TF_Scalp_HTF_Divergence, Divergence_Lookback_Bars);
+            if (htfDivergenceBias > 0) sellCond = false;
+            if (htfDivergenceBias < 0) buyCond = false;
+        }
     
     if (!buyCond && !sellCond) return;
     
