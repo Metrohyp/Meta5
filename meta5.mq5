@@ -2338,19 +2338,19 @@ void ManageOpenPositions()
         // ==================================================================
         
         // ======================= TIER 1: MAIN TREND FLIP (HIGHEST PRIORITY) =======================
-        
-        // If the main trend flips, close ALL positions (main, scalp, manual).
-        // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;  // <-- COMMENTED OUT
-        // if (main_st_dir != requiredDir)                          // <-- COMMENTED OUT
-        // {                                                         // <-- COMMENTED OUT
-        //    if (Trade.PositionClose(ticket))                       // <-- COMMENTED OUT
-        //    {                                                      // <-- COMMENTED OUT
-        //       SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f", // <-- COMMENTED OUT
-        //                           pcomment, tfstr(TF_Trade), cur)); // <-- COMMENTED OUT
-        //    }                                                      // <-- COMMENTED OUT
-        //    continue; // Position is closed, move to the next one. // <-- COMMENTED OUT
-        // }                                                         // <-- COMMENTED OUT
-        
+                
+                // If the main trend flips, close ALL positions (main, scalp, manual).
+                // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1; // <-- KEEP THIS COMMENTED
+                
+                if (main_st_dir != requiredDir)                          // <-- UNCOMMENTED
+                {                                                        // <-- UNCOMMENTED
+                   if (Trade.PositionClose(ticket))                      // <-- UNCOMMENTED
+                   {                                                     // <-- UNCOMMENTED
+                      SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f", // <-- UNCOMMENTED
+                                          pcomment, tfstr(TF_Trade), cur));
+                   }                                                     // <-- UNCOMMENTED
+                   continue; // Position is closed, move to the next one. // <-- UNCOMMENTED
+                }                                                        // <-- UNCOMMENTED
         
         
         // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
