@@ -84,13 +84,14 @@ input int Cooldown_Momentum_Bars = 5; // momentum after a win, How many bars to 
 // --- Trailing Stops ---
 input bool           Use_ATR_Trailing   = true;    // Dynamic SL that follows price based on volatility.
 input int            ATR_Period_Trail   = 10;       // <-- ATR period for the trailing stop
-input double         ATR_Trail_Mult     = 3.5;      // Multiplier for ATR Trail. Higher = wider trail.
+input double         ATR_Trail_Mult     = 2.5;      // Multiplier for ATR Trail. Higher = wider trail.
 input bool           Use_HalfStep_Trailing = false;  // Alternative trail: SL moves half the distance to TP.
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
 input double         BE_Activation_TP_Percent = 15.0; // Move SL to BE when trade is X% of the way to TP.
-input double         BE_Buffer_Points         = 400.0; // Profit gap in points for BE (e.g., 100)
+input double         BE_Profit_Percent        = 5.0;  // lock in at BE profit (as % of TP).
+input double         BE_Buffer_Points         = 100.0; // Profit gap in points for BE (e.g., 100)
 
 // --- Emergency Exit ---
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -2416,15 +2417,19 @@ void ManageOpenPositions()
                 double requiredProgress = totalDistToTP * (BE_Activation_TP_Percent / 100.0);
                 
                 if (currentProgress >= requiredProgress)
-                {
-                    // Calculate the new Breakeven SL with a small guaranteed profit buffer
-                    double targetBE = (type == POSITION_TYPE_BUY) ?
-                    (entry + BE_Buffer) : (entry - BE_Buffer);
-                    
-                    // Only modify if the current SL is NOT already past the targetBE level
-                    bool needsMove = (type == POSITION_TYPE_BUY && sl < targetBE) ||
-                    (type == POSITION_TYPE_SELL && sl > targetBE);
-                    
+                                {
+                                    // --- MODIFIED: Calculate BE based on BE_Profit_Percent ---
+                                    double profitToLockIn = totalDistToTP * (BE_Profit_Percent / 100.0);
+                                    
+                                    // Fallback: Ensure we at least move it past entry by a small amount
+                                    if (profitToLockIn <= (100.0 * _Point))
+                                    {
+                                        profitToLockIn = 100.0 * _Point; // Default to 100 points
+                                    }
+                                    
+                                    double targetBE = (type == POSITION_TYPE_BUY) ? (entry + profitToLockIn) : (entry - profitToLockIn);
+                                    // --- END MODIFICATION ---
+                                    bool needsMove = (type == POSITION_TYPE_BUY && sl < targetBE) || (type == POSITION_TYPE_SELL && sl > targetBE);
                     if(needsMove)
                     {
                         double modSL = targetBE, modTP = tp;
