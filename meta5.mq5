@@ -90,6 +90,7 @@ input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step 
 
 // --- Break-Even ---
 input double         BE_Activation_TP_Percent = 15.0; // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Buffer_Points         = 400.0; // Profit gap in points for BE (e.g., 100)
 
 // --- Emergency Exit ---
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -115,7 +116,7 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
+input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
@@ -2401,7 +2402,7 @@ void ManageOpenPositions()
         if(BE_Activation_TP_Percent > 0.0 && tp > 0.0 && sl > 0.0)
         {
             // Define a tiny buffer to guarantee the modification is an 'improvement' to the broker
-            const double BE_Buffer = 100.0 * _Point; // Move SL to entry + 1 Point (guaranteed improvement)
+            const double BE_Buffer = BE_Buffer_Points * _Point; // Move SL to entry + 1 Point (guaranteed improvement)
             
             double totalDistToTP = (type == POSITION_TYPE_BUY) ?
             (tp - entry) : (entry - tp);
