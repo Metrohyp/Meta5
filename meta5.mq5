@@ -39,7 +39,7 @@ input double         Risk_Percent_Scalp = 1;      // if >0, overrides and uses t
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
-input int            HTF_Filter_Mode = 1;              // 0=Trend Align, 1=Breakout, 2=BOTH (Trend AND Breakout)
+input int            HTF_Filter_Mode = 2;              // 0=Trend Align, 1=Breakout, 2=BOTH (Trend AND Breakout)
 input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;    // Timeframe for the filter.
 
 input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
@@ -60,7 +60,7 @@ input bool    Use_HTF_Filter            = true;                    // enable HTF
 
 // --- Master Strategy Selection ---
 input int            Entry_Mode = 2; // 0=Trend-Following, 1=Reversal (Divergence), 2=BOTH
-input int            Directional_Filter_Mode = 1; // 0=HTF Trend/Breakout, 1=HTF Divergence
+input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF Divergence
 
 // --- Settings for HTF Divergence Filter (Directional Mode 1) ---
 input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_M4;    // Timeframe to check for directional divergence.
@@ -94,6 +94,7 @@ input double         BE_Profit_Percent        = 5.0;  // lock in at BE profit (a
 input double         BE_Buffer_Points         = 100.0; // Profit gap in points for BE (e.g., 100)
 
 // --- Emergency Exit ---
+input bool           Use_Volatility_Entry_Filter = true; // Block new entries if last candle was too big
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
 input double         CircuitBreaker_ATR_Mult = 4.5;    // Closes all if a candle is > X times the average size.
 
@@ -123,6 +124,14 @@ input bool           One_Trade_At_A_Time = false;   // If true, only one main tr
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
 input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
+
+// --- NEW: TRADING SESSION TIMER ---
+//Overnight Sessions: The logic can also handle overnight sessions. For example, if you set the start to 22:00 and the end to 05:00
+input bool           Use_Time_Filter   = false;  // true = Only trade during the session below
+input int            Trade_Start_Hour  = 9;      // Start hour (server time, e.g., 9)
+input int            Trade_Start_Min   = 0;      // Start minute (e.g., 0)
+input int            Trade_End_Hour    = 17;     // End hour (server time, e.g., 17)
+input int            Trade_End_Min     = 0;      // End minute (e.g., 0)
 
 //================================================================================
 //                --- ADVANCED & SYSTEM SETTINGS ---
@@ -204,6 +213,7 @@ input double         Scalp_Risk_Mult    = 2.0;
 
 // --- System & Housekeeping ---
 input long           Magic            = 250925;
+input long           Magic_Reversal   = 250926; // Magic number for Reversal/Divergence trades
 input int            Cooldown_Bars    = 2;
 input int            Slippage_Points  = 50;
 input bool           Send_Closed_Trade_Alerts = true;
@@ -297,6 +307,47 @@ string URLEncode(const string s)
 }
 //======================== Indicator Helpers =========================
 
+// --- NEW: Helper function to check if we are within the allowed trading session ---
+bool IsTradeTime()
+{
+    // 1. If the filter is turned off, it's always time to trade.
+    if (!Use_Time_Filter)
+    {
+        return true;
+    }
+
+    // 2. Get the server's current time
+    MqlDateTime now;
+    TimeCurrent(now);
+    int currentHour = now.hour;
+    int currentMin  = now.min;
+
+    // 3. Convert all times to total minutes since midnight for easy comparison
+    int startTime = Trade_Start_Hour * 60 + Trade_Start_Min;
+    int endTime   = Trade_End_Hour   * 60 + Trade_End_Min;
+    int currentTime = currentHour * 60 + currentMin;
+
+    // Case 1: Normal Day Session (e.g., 09:00 - 17:00)
+    if (startTime <= endTime)
+    {
+        if (currentTime >= startTime && currentTime < endTime)
+        {
+            return true; // We are within the session
+        }
+    }
+    // Case 2: Overnight Session (e.g., 22:00 - 05:00)
+    else
+    {
+        if (currentTime >= startTime || currentTime < endTime)
+        {
+            return true; // We are in the overnight session
+        }
+    }
+
+    // If none of the above, we are outside the allowed trading time
+    return false;
+}
+//======================== Indicator Helpers =========================
 // Get Momentum value (oscillates around 100)
 double MomentumValue(ENUM_TIMEFRAMES tf, int shift=1)
 {
@@ -1298,7 +1349,7 @@ bool GetLatestOpenPos(int dir, bool includeManual, ulong &ticketOut, double &ent
         int d=(typ==POSITION_TYPE_BUY)?+1:-1;
         if(d!=dir) continue;
         long mg=PositionGetInteger(POSITION_MAGIC);
-        if(!(mg==Magic || (includeManual && mg==0))) continue;
+        if(!(mg==Magic || mg==Magic_Reversal || (includeManual && mg==0))) continue;
         datetime t=(datetime)PositionGetInteger(POSITION_TIME);
         if(t>newest){ newest=t; found=true; ticketOut=tk;
             entryOut=PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1392,7 +1443,7 @@ int CountOpen()
         ulong ticket = PositionGetTicket(p);
         if(PositionSelectByTicket(ticket))
         {
-            if(PositionGetInteger(POSITION_MAGIC)==Magic && (string)PositionGetString(POSITION_SYMBOL)==_Symbol)
+            if((PositionGetInteger(POSITION_MAGIC)==Magic || PositionGetInteger(POSITION_MAGIC)==Magic_Reversal) && (string)PositionGetString(POSITION_SYMBOL)==_Symbol)
                 cnt++;
         }
     }
@@ -1407,7 +1458,7 @@ int CountOpenByCommentSubstr(const string key)
         ulong tk=PositionGetTicket(i);
         if(!PositionSelectByTicket(tk)) continue;
         if((string)PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-        if((long)PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+        if((long)PositionGetInteger(POSITION_MAGIC)!=Magic && (long)PositionGetInteger(POSITION_MAGIC)!=Magic_Reversal) continue;
         string cmt=(string)PositionGetString(POSITION_COMMENT);
         if(StringFind(cmt,key,0)>=0) cnt++;
     }
@@ -1425,7 +1476,7 @@ int CountPendingThisEA()
         if(!OrderSelect(ticket)) continue;
         
         if((string)OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
-        if((long)OrderGetInteger(ORDER_MAGIC)   != Magic)   continue;
+        if((long)OrderGetInteger(ORDER_MAGIC) != Magic && (long)OrderGetInteger(ORDER_MAGIC) != Magic_Reversal) continue;
         
         long t = (long)OrderGetInteger(ORDER_TYPE);
         if(t==ORDER_TYPE_BUY_STOP || t==ORDER_TYPE_SELL_STOP) c++;
@@ -1444,6 +1495,12 @@ int CountPendingThisEA()
 void TryScalpEntries()
 {
     if(!Use_Scalp_Mode) return;
+    // --- NEW: TIME FILTER CHECK ---
+        if (!IsTradeTime())
+        {
+            return; // Not within the allowed trading session
+        }
+        // --- END TIME FILTER ---
     if(Scalp_Only_When_No_Main && CountOpen()>0) return;
     if(CountOpenByCommentSubstr("V25 Scalp") >= Scalp_Max_Concurrent) return;
     // --- NEW: Check Momentum Cooldown Status ---
@@ -1467,6 +1524,30 @@ void TryScalpEntries()
     }
     // --- End of New Block ---
     
+    // --- NEW: VOLATILITY ENTRY FILTER ---
+        if(Use_Volatility_Entry_Filter)
+        {
+            double atr = 0;
+            int hATR = iATR(_Symbol, TF_Scalp, ST_ATR_Period);
+            if(hATR != INVALID_HANDLE)
+            {
+                double a[];
+                if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0];
+                IndicatorRelease(hATR);
+            }
+            
+            double lastCandleSize = iHigh(_Symbol, TF_Scalp, 1) - iLow(_Symbol, TF_Scalp, 1);
+            if(atr > 0 && lastCandleSize > (atr * CircuitBreaker_ATR_Mult))
+            {
+                return; // Block scalp entry, last candle was too volatile
+            }
+        }
+        // --- END NEW FILTER ---
+    
+    // --- NEW: Magic Number Logic ---
+        long magicToUse = Magic;
+        string commentSuffix = "";
+    
     // --- Get Core Indicator Data for Scalp ---
     double stLineScalp=0; int dirScalp=0;
     if(!CalcSuperTrend(TF_Scalp, ST_ATR_Period, ST_ATR_Mult, 1, stLineScalp, dirScalp)) return;
@@ -1481,18 +1562,32 @@ void TryScalpEntries()
     bool isTrendFlip = (mainSTDir != 0 && mainSTDir != prevDir_ST);
     
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-    bool buySignal = false;
-    bool sellSignal = false;
-    if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following
-    {
-        if (dirScalp > 0 && c > stLineScalp) buySignal = true;
-        if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
-    }
-    if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence)
-    {
-        if(CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp)) buySignal = true;
-        if(CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp)) sellSignal = true;
-    }
+        bool buySignal = false;
+        bool sellSignal = false;
+
+        // --- Priority 1: Check for Trend signals ---
+        if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following
+        {
+            if (dirScalp > 0 && c > stLineScalp) buySignal = true;
+            if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
+        }
+
+        // --- Priority 2: Check for Reversal signals IF no trend signal was found ---
+        if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence)
+        {
+            if(!buySignal && CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp))
+            {
+                buySignal = true;
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Reversal";
+            }
+            if(!sellSignal && CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp))
+            {
+                sellSignal = true;
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Reversal";
+            }
+        }
     
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
@@ -1732,11 +1827,12 @@ void TryScalpEntries()
     
     if (Auto_Trade)
     {
+        Trade.SetExpertMagicNumber(magicToUse); // <-- ADD THIS LINE
         bool sent = false; // Initialize sent variable
         if (entryType == "Market")
         {
             if (buy) sent = Trade.Buy(lots, _Symbol, 0, finalSL, finalTP, "V25 Scalp Buy");
-            else sent = Trade.Sell(lots, _Symbol, 0, finalSL, finalTP, "V25 Scalp Sell");
+            else sent = Trade.Sell(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Sell%s", commentSuffix));
         }
         else // "Limit"
         {
@@ -1745,7 +1841,7 @@ void TryScalpEntries()
             datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
             
             if (buy) sent = Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, "V25 Scalp Buy Limit");
-            else sent = Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, "V25 Scalp Sell Limit");
+            else sent = Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Sell Limit%s", commentSuffix));
         }
         
         if(sent)
@@ -1760,6 +1856,12 @@ void TryScalpEntries()
 // ====================== EA Entries ======================
 void TryEntries()
 {
+    // --- NEW: TIME FILTER CHECK ---
+        if (!IsTradeTime())
+        {
+            return; // Not within the allowed trading session
+        }
+        // --- END TIME FILTER ---
     // ====================== PER-BAR + COOLDOWN GUARDS ======================
     static datetime lastEvalBar = 0;
     datetime barTime = iTime(_Symbol, TF_Trade, 0);
@@ -1791,6 +1893,31 @@ void TryEntries()
         }
     }
     // --- End of New Block ---
+    
+    // --- NEW: VOLATILITY ENTRY FILTER ---
+        if(Use_Volatility_Entry_Filter)
+        {
+            double atr = 0;
+            int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period);
+            if(hATR != INVALID_HANDLE)
+            {
+                double a[];
+                if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0];
+                IndicatorRelease(hATR);
+            }
+            
+            double lastCandleSize = iHigh(_Symbol, TF_Trade, 1) - iLow(_Symbol, TF_Trade, 1);
+            if(atr > 0 && lastCandleSize > (atr * CircuitBreaker_ATR_Mult))
+            {
+                return; // Block main entry, last candle was too volatile
+            }
+        }
+        // --- END NEW FILTER ---
+    
+    // --- NEW: Magic Number Logic ---
+        long magicToUse = Magic;
+        string commentSuffix = "";
+    
     // ================================ FILTERS ==============================
     double stLineM15=0, stLineH1=0, stLineH4=0;
     int    dirM15=0, dirH1=0, dirH4=0;
@@ -1845,18 +1972,32 @@ void TryEntries()
     }
     
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-    bool buySignal = false;
-    bool sellSignal = false;
-    if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following
-    {
-        if (dirM15 > 0 && c > stLineM15) buySignal = true;
-        if (dirM15 < 0 && c < stLineM15) sellSignal = true;
-    }
-    if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence)
-    {
-        if(CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) buySignal = true;
-        if(CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) sellSignal = true;
-    }
+        bool buySignal = false;
+        bool sellSignal = false;
+
+        // --- Priority 1: Check for Trend signals ---
+        if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following
+        {
+            if (dirM15 > 0 && c > stLineM15) buySignal = true;
+            if (dirM15 < 0 && c < stLineM15) sellSignal = true;
+        }
+
+        // --- Priority 2: Check for Reversal signals IF no trend signal was found ---
+        if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence)
+        {
+            if(!buySignal && CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade))
+            {
+                buySignal = true;
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Reversal";
+            }
+            if(!sellSignal && CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade))
+            {
+                sellSignal = true;
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Reversal";
+            }
+        }
     
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
@@ -2071,7 +2212,7 @@ void TryEntries()
                                             _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
             if(Auto_Trade)
             {
-                Trade.SetExpertMagicNumber(Magic);
+                Trade.SetExpertMagicNumber(magicToUse);
                 bool sent=false;
                 double msgEntryPrice = entry;
                 
@@ -2088,7 +2229,7 @@ void TryEntries()
                     expiration_buy += (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
                     
                     sent = Trade.BuyStop(lots, stopPrice, _Symbol, sl, tp,
-                                         ORDER_TIME_SPECIFIED, expiration_buy, "V25 BuyStop");
+                                                             ORDER_TIME_SPECIFIED, expiration_buy, StringFormat("V25 BuyStop%s", commentSuffix));
                     
                     string buySignalMsg = StringFormat(
                                                        "🟢 <b>BUY SIGNAL DETECTED</b> 🟢\n\n"
@@ -2108,7 +2249,7 @@ void TryEntries()
                 else
                 {
                     double lots = LotsByRisk(Risk_Percent, (entry - sl)/_Point);
-                    sent = Trade.Buy(lots, _Symbol, entry, sl, tp, "V25 Buy");
+                    sent = Trade.Buy(lots, _Symbol, entry, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
                 }
                 
                 if(sent)
@@ -2212,7 +2353,7 @@ void TryEntries()
                                             _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
             if(Auto_Trade)
             {
-                Trade.SetExpertMagicNumber(Magic);
+                Trade.SetExpertMagicNumber(magicToUse);
                 bool sent=false;
                 double msgEntryPrice = entry;
                 
@@ -2229,7 +2370,7 @@ void TryEntries()
                     expiration_sell += (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
                     
                     sent = Trade.SellStop(lots, stopPrice, _Symbol, sl, tp,
-                                          ORDER_TIME_SPECIFIED, expiration_sell, "V25 SellStop");
+                                                              ORDER_TIME_SPECIFIED, expiration_sell, StringFormat("V25 SellStop%s", commentSuffix));
                     
                     string sellSignalMsg = StringFormat(
                                                         "🔴 <b>SELL SIGNAL DETECTED</b> 🔴\n\n"
@@ -2249,7 +2390,7 @@ void TryEntries()
                 else
                 {
                     double lots = LotsByRisk(Risk_Percent, (sl - entry)/_Point);
-                    sent = Trade.Sell(lots, _Symbol, entry, sl, tp, "V25 Sell");
+                    sent = Trade.Sell(lots, _Symbol, entry, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
                 }
                 
                 if(sent)
@@ -2310,7 +2451,7 @@ void ManageOpenPositions()
         
         long magic = PositionGetInteger(POSITION_MAGIC);
         
-        bool isEA      = (magic==Magic);
+        bool isEA      = (magic==Magic || magic==Magic_Reversal);
         
         bool isManual  = (magic==0);
         
@@ -2911,7 +3052,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         if(entryType == DEAL_ENTRY_IN)
         {
             long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-            if(mg != Magic) return; // Only this EA's trades
+            if(mg != Magic && mg != Magic_Reversal) return; // Only this EA's trades
             
             long   dType   = (long)HistoryDealGetInteger(deal, DEAL_TYPE);
             string typeStr = (dType==DEAL_TYPE_BUY) ? "BUY" : "SELL";
@@ -2957,7 +3098,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         if(Send_Closed_Trade_Alerts && (entryType==DEAL_ENTRY_OUT || entryType==DEAL_ENTRY_OUT_BY))
         {
             long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-            if(mg != Magic) return;
+            if(mg != Magic && mg != Magic_Reversal) return;
             
             double P    = HistoryDealGetDouble (deal, DEAL_PROFIT);
             double F    = HistoryDealGetDouble (deal, DEAL_FEE);
@@ -3014,7 +3155,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
     else if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
     {
         // --- ERROR FIX: Check req.magic instead of trans.magic ---
-        if(req.magic == Magic)
+        if(req.magic == Magic || req.magic == Magic_Reversal)
         {
             if(trans.order_type == ORDER_TYPE_BUY_LIMIT || trans.order_type == ORDER_TYPE_SELL_LIMIT)
             {
