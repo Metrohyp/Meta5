@@ -224,11 +224,11 @@ input int            Slippage_Points  = 50;
 input bool           Send_Closed_Trade_Alerts = true;
 input bool           Send_Weekly_Report = true;
 input int            Weekly_Report_DOW = 0;
-input int            Weekly_Report_Hour = 21;
+input int            Weekly_Report_Hour = 22;
 input int            Weekly_Report_Min = 0;
 input bool           Send_Monthly_Report = true;
 input int            Monthly_Report_DOM = 1;
-input int            Monthly_Report_Hour = 21;
+input int            Monthly_Report_Hour = 22;
 input int            Monthly_Report_Min = 0;
 
 //============================== Globals =============================
@@ -2330,18 +2330,45 @@ void ManageOpenPositions()
         // In ManageOpenPositions() function - ADD THIS BLOCK after trend flip checks
         
         // ======================= MOMENTUM DIVERGENCE EXIT (TIER 1.5) =======================
-        if(Use_Momentum_Exit_Filter && isEA) // Only for EA trades, not manual
-        {
-            if(CheckMomentumDivergence(type, Divergence_Lookback_Bars, TF_Trade))
-            {
-                if(Trade.PositionClose(ticket))
+                if(Use_Momentum_Exit_Filter && isEA) // Only for EA trades, not manual
                 {
-                    SendTG(StringFormat("🔄 %s closed: MOMENTUM DIVERGENCE detected on %s. Exit price %.2f",
-                                        pcomment, tfstr(TF_Trade), cur));
+                    if(CheckMomentumDivergence(type, Divergence_Lookback_Bars, TF_Trade))
+                    {
+                        // --- NEW: Calculate P/L Before Closing ---
+                                        double potentialProfit = 0;
+                                        // double commission = PositionGetDouble(POSITION_COMMISSION); // <-- MAKE SURE THIS IS COMMENTED OUT or DELETED
+                                        double swap = PositionGetDouble(POSITION_SWAP);
+                                        double fee = 0; // <-- ENSURE THIS LINE IS PRESENT AND UNCOMMENTED
+
+                                        if (type == POSITION_TYPE_BUY) {
+                                            potentialProfit = (cur - entry) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                                        } else { // SELL
+                                            potentialProfit = (entry - cur) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                                        }
+                                        // --- FIX: REMOVE 'commission' from this line ---
+                                        double potentialNet = potentialProfit + swap + fee;
+                                        // --- END FIX ---
+                        string profitEmoji = (potentialNet >= 0) ? "✅" : "❌";
+                        string profitSign  = (potentialNet >= 0) ? "+" : "";
+                        // --- END P/L Calculation ---
+
+                        if(Trade.PositionClose(ticket))
+                        {
+                            // --- MODIFIED: Updated Alert Message ---
+                            SendTG(StringFormat("%s %s closed:\n" // Newline after "closed:"
+                                                                    "MOMENTUM DIVERGENCE\n" // Newline after "DIVERGENCE"
+                                                                    "Detected on %s.\n" // Newline after timeframe
+                                                                    "💰 Profit/Loss: %s%.2f (Exit: %.2f)",
+                                                                    profitEmoji,
+                                                                    pcomment,
+                                                                    tfstr(TF_Trade),
+                                                                    profitSign, potentialNet,
+                                                                    cur));
+                            // --- END MODIFICATION ---
+                        }
+                        continue; // Position closed, move to next
+                    }
                 }
-                continue; // Position closed, move to next
-            }
-        }
         
         // --- Breakeven (BE) & Protection Logic (Percentage Only) ---
         // Note: BE_Activation_TP_Percent must be > 0.0 to enable this block.
@@ -2714,128 +2741,77 @@ void SendPeriodReport(datetime fromTs, datetime toTs, const string label)
         SendTG(body);
     }
 
-// REPLACEMENT FOR OnTick() FUNCTION
-// REPLACEMENT FOR OnTick() FUNCTION
-void OnTick()
-{
-    // --- Part 1: Logic that runs on EVERY tick (Circuit Breaker) ---
-    if(Use_Volatility_CircuitBreaker)
-    {
-        // Cooldown timer to prevent it from firing repeatedly on the same candle
-        static datetime lastBreakerTripTime = 0;
-        if(TimeCurrent() - lastBreakerTripTime < 60) // 60-second cooldown
-        {
-            return; // Still in cooldown, do nothing
-        }
-        
-        // Get current candle size and ATR on the main trading timeframe
-        double high0 = iHigh(_Symbol, TF_Trade, 0);
-        double low0  = iLow(_Symbol, TF_Trade, 0);
-        double candleSize = high0 - low0;
-        
-        double atr = 0;
-        int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period);
-        if(hATR != INVALID_HANDLE)
-        {
-            double a[];
-            if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0];
-            IndicatorRelease(hATR);
-        }
-        
-        // Check if the circuit breaker condition is met
-        if(atr > 0 && candleSize > (atr * CircuitBreaker_ATR_Mult))
-        {
-            if(PositionsTotal() > 0) // Only fire if there are open positions
-            {
-                EmergencyCloseAllPositions("Extreme candle volatility detected.");
-                lastBreakerTripTime = TimeCurrent(); // Start the cooldown
-                return; // Stop further processing on this tick
-            }
-        }
-    }
-    
-    // --- Part 2: Your original logic that runs ONCE per new bar ---
-    static datetime lastBarTime = 0;
-    datetime currentBarTime = iTime(_Symbol, TF_Trade, 0);
-    
-    if(currentBarTime != lastBarTime)
-    {
-        lastBarTime = currentBarTime;
-        ManagePendingOrders();
-        // Check for main strategy entries.
-        TryEntries();
-        
-        // Check for scalp entries
-        static datetime lastScalpBarTime = 0;
-        if(Use_Scalp_Mode)
-        {
-            datetime currentScalpBarTime = iTime(_Symbol, TF_Scalp, 0);
-            if(currentScalpBarTime != lastScalpBarTime)
-            {
-                lastScalpBarTime = currentScalpBarTime;
-                TryScalpEntries();
-            }
-        }
-        ManageRetraceLimitOrders(); // <-- ADD THIS LINE
-        // Manage all other per-bar tasks
-        TouchUpManualInitial();
-        ManageOpenPositions();
-    }
-}
-
 // REPLACEMENT FOR OnTimer() FUNCTION
 void OnTimer()
 {
     datetime now = TimeCurrent();
     MqlDateTime st; TimeToStruct(now, st);
-    
-    // --- 9. SCHEDULED REPORTS (WEEKLY)
+
+    // --- SCHEDULED REPORTS (WEEKLY) ---
     if(Send_Weekly_Report)
     {
-        bool dow_ok = (st.day_of_week == Weekly_Report_DOW);
-        bool time_ok= (st.hour==Weekly_Report_Hour && st.min>=Weekly_Report_Min);
-        bool gap_ok = (now - g_lastWeeklyReportSent) > (5*24*60*60); // prevent duplicates
+        bool dow_ok = (st.day_of_week == Weekly_Report_DOW); // Check if it's the reporting day (Sunday=0)
+        bool time_ok= (st.hour==Weekly_Report_Hour && st.min>=Weekly_Report_Min); // Check if it's the reporting time
+        bool gap_ok = (now - g_lastWeeklyReportSent) > (5*24*60*60); // Prevent duplicates (allow only 1 report per 5 days)
+
         if(dow_ok && time_ok && gap_ok)
         {
-            string weeklyReport = StringFormat(
-                                               "📊 <b>WEEKLY REPORT</b>\n\n"
-                                               "📈 <b>EA Status:</b> Active\n"
-                                               "💼 <b>Main Strategy:</b> ENABLED\n"
-                                               "⚡ <b>Scalp Strategy:</b> %s\n"
-                                               "📊 <b>Symbol:</b> %s\n\n"
-                                               "<i>All systems operational</i>",
-                                               Use_Scalp_Mode ? "ENABLED" : "DISABLED",
-                                               _Symbol
-                                               );
-            SendTG(weeklyReport);
-            g_lastWeeklyReportSent = now;
+            // Calculate start time (7 days ago from 'now')
+            datetime weekStart = now - (7 * 24 * 60 * 60);
+            // Call the detailed report function
+            SendPeriodReport(weekStart, now, "WEEKLY");
+            g_lastWeeklyReportSent = now; // Update the timestamp
         }
     }
-    
-    // --- 9. SCHEDULED REPORTS (MONTHLY)
+
+    // --- SCHEDULED REPORTS (MONTHLY) ---
     if(Send_Monthly_Report)
     {
-        bool dom_ok = (st.day == Monthly_Report_DOM);
-        bool time_ok= (st.hour==Monthly_Report_Hour && st.min>=Monthly_Report_Min);
-        bool gap_ok = (now - g_lastMonthlyReportSent) > (25*24*60*60);
+        bool dom_ok = (st.day == Monthly_Report_DOM); // Check if it's the 1st day of the month
+        bool time_ok= (st.hour==Monthly_Report_Hour && st.min>=Monthly_Report_Min); // Check reporting time
+        bool gap_ok = (now - g_lastMonthlyReportSent) > (25*24*60*60); // Prevent duplicates (allow only 1 report per 25 days)
+
         if(dom_ok && time_ok && gap_ok)
         {
-            string monthlyReport = StringFormat(
-                                                "📈 <b>MONTHLY REPORT</b>\n\n"
-                                                "✅ <b>EA Status:</b> Running Smoothly\n"
-                                                "📊 <b>Symbol:</b> %s\n"
-                                                "⏰ <b>Active Since:</b> %s\n\n"
-                                                "<i>Continuing market monitoring</i>",
-                                                _Symbol,
-                                                TimeToString(g_eaStartTime, TIME_DATE|TIME_SECONDS)
-                                                );
-            SendTG(monthlyReport);
-            g_lastMonthlyReportSent = now;
+            // Calculate the start time (approximately 1 month ago)
+            MqlDateTime startDt;
+            TimeToStruct(now, startDt);
+            // Go back one month, handle year change
+            if (startDt.mon == 1) {
+                startDt.mon = 12;
+                startDt.year--;
+            } else {
+                startDt.mon--;
+            }
+            // Ensure the day is valid for the previous month (e.g., handle Feb 30th)
+            int daysInPrevMonth = DaysInMonth(startDt.year, startDt.mon);
+            startDt.day = MathMin(st.day, daysInPrevMonth); // Use same day or last day of prev month
+
+            datetime monthStart = StructToTime(startDt);
+
+            // Call the detailed report function
+            SendPeriodReport(monthStart, now, "MONTHLY");
+            g_lastMonthlyReportSent = now; // Update the timestamp
         }
     }
 }
 
+// Helper function to get days in a month (needed for monthly report)
+int DaysInMonth(int year, int month)
+{
+    if(month<1 || month>12) return 0;
+    int days[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if(month==2 && IsLeapYear(year)) return 29;
+    return days[month];
+}
 
+// Helper function to check for leap year (needed for monthly report)
+bool IsLeapYear(int year)
+{
+    return (year%4==0 && (year%100!=0 || year%400==0));
+}
+
+// REPLACEMENT FOR OnTradeTransaction() FUNCTION
 // REPLACEMENT FOR OnTradeTransaction() FUNCTION
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest      &req,
@@ -2905,33 +2881,35 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         if(Send_Closed_Trade_Alerts && (entryType==DEAL_ENTRY_OUT || entryType==DEAL_ENTRY_OUT_BY))
         {
             long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
+            // --- Ensure we only process trades from our EA (both magic numbers) ---
             if(mg != Magic && mg != Magic_Reversal) return;
-            
+
             double P    = HistoryDealGetDouble (deal, DEAL_PROFIT);
             double F    = HistoryDealGetDouble (deal, DEAL_FEE);
             double C    = HistoryDealGetDouble (deal, DEAL_COMMISSION);
             double S    = HistoryDealGetDouble (deal, DEAL_SWAP);
             double net  = P + F + C + S;
             string cmt  = (string)HistoryDealGetString(deal, DEAL_COMMENT);
-            
-            // --- NEW: Activate Momentum Cooldown on Profit ---
-            if (net >= 0) // If trade was a win or break-even
+
+            // --- Activate Momentum Cooldown if the trade was profitable or break-even ---
+            if (net >= 0)
             {
                 g_momentumCooldownActive = true;
-                g_cooldownStartTime = TimeCurrent(); // Use current time for cooldown start
+                g_cooldownStartTime = TimeCurrent();
                 SendTG("ℹ️ Cooldown activated after profitable trade. Switching to reversal-only mode.");
             }
-            // --- End of New Block ---
-            
-            // --- ERROR FIX: Declare entryPrice here so it's available for the alert message ---
+
+            // --- Find the Original Entry Price for this Closed Position ---
             double entryPrice = 0.0;
-            ulong posID_closed = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
-            if (posID_closed > 0)
+            ulong positionID = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+            if (positionID > 0)
             {
-                for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
+                for (int i = (int)HistoryDealsTotal() - 1; i >= 0; i--)
                 {
                     ulong d_ticket = HistoryDealGetTicket(i);
-                    if (HistoryDealGetInteger(d_ticket, DEAL_POSITION_ID) == posID_closed &&
+                    if (d_ticket == 0) continue;
+
+                    if (HistoryDealGetInteger(d_ticket, DEAL_POSITION_ID) == positionID &&
                         HistoryDealGetInteger(d_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
                     {
                         entryPrice = HistoryDealGetDouble(d_ticket, DEAL_PRICE);
@@ -2939,22 +2917,36 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                     }
                 }
             }
-            
-            string reason = "Closed by TP/SL";
-            if (cmt == "") reason = "Closed Manually";
-            
+
+            // Determine the closing reason
+            string reason = "Unknown/Other";
+            long dealReason = HistoryDealGetInteger(deal, DEAL_REASON);
+
+            // FIXED: Use proper MQL5 deal reason constants
+            if(dealReason == DEAL_REASON_CLIENT)           reason = "Closed Manually by Client";
+            else if(dealReason == DEAL_REASON_EXPERT)      reason = "Closed by EA Logic";
+            else if(dealReason == DEAL_REASON_SL)          reason = "Closed by Stop Loss";
+            else if(dealReason == DEAL_REASON_TP)          reason = "Closed by Take Profit";
+            else if(dealReason == DEAL_REASON_SO)          reason = "Closed by Stop Out";
+            else if(dealReason == DEAL_REASON_ROLLOVER)    reason = "Closed due to Rollover";
+            else if(dealReason == DEAL_REASON_VMARGIN)     reason = "Closed by Var. Margin";
+            else if(dealReason == DEAL_REASON_SPLIT)       reason = "Closed due to Split";
+            else if(cmt == "")                             reason = "Closed Manually (No Comment)";
+            else                                           reason = "Closed (Check Comment/Broker)";
+
+            // --- Send the Telegram Alert ---
             string closeMsg = StringFormat(
-                                           "%s <b>POSITION CLOSED</b>\n\n"
-                                           "📊 <b>Symbol:</b> %s\n"
-                                           "💰 <b>Entry:</b> %s\n"
-                                           "💰 <b>Profit/Loss:</b> %s%.2f\n"
-                                           "⚡ <b>Reason:</b> %s",
+                                           "%s **POSITION CLOSED**\n\n"
+                                           "📊 **Symbol:** %s\n"
+                                           "▶️ **Entry:** %s\n"
+                                           "💰 **Profit/Loss:** %s%.2f\n"
+                                           "⚡ **Reason:** %s",
                                            net >= 0 ? "✅" : "❌",
                                            _Symbol,
                                            DoubleToString(entryPrice, _Digits),
                                            net >= 0 ? "+" : "", net,
                                            reason
-                                           );
+                                          );
             SendTG(closeMsg);
         }
     }
