@@ -116,7 +116,7 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
-input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
+input bool           Use_ST_Flip_Retest = true;      // Wait for price to pull back to the ST line before entry.
 input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
@@ -193,7 +193,7 @@ input double         HTF_Breakout_ATR_Margin = 0.25;
 input int            HTF_Breakout_Mode  = 0;
 input int            HTF_Breakout_MaxAgeBars = 3;
 input double         Retest_ATR_Tolerance = 0.25;
-input double         AddEntry_Trigger_Ratio = 0.2;
+input double         AddEntry_Trigger_Ratio = 0.3;
 input bool           Adjust_All_To_Latest = true;
 input int            Min_Bars_After_Flip = 1;
 input double         Confirm_Close_Dist_ATR = 0.20;
