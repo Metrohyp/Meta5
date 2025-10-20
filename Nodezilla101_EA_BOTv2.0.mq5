@@ -63,7 +63,7 @@ input int            Entry_Mode = 2; // 0=Trend-Following, 1=Reversal (Divergenc
 input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF Divergence
 
 // --- Settings for HTF Divergence Filter (Directional Mode 1) ---
-input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_M4;    // Timeframe to check for directional divergence.
+input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H4;    // Timeframe to check for directional divergence.
 input ENUM_TIMEFRAMES TF_Scalp_HTF_Divergence = PERIOD_H1; // HTF Divergence filter just for scalps
 
 // --- General Entry Filters ---
@@ -99,7 +99,7 @@ input double         Partial_Close_TP_Percent  = 90.0;  // Trigger partial close
 input double         Partial_Close_Volume_Percent = 50.0; // Close X% of the position volume
 
 // --- Emergency Exit ---
-input bool           Use_Volatility_Entry_Filter = true; // Block new entries if last candle was too big
+input bool           Use_Volatility_Entry_Filter = false; // Block new entries if last candle was too big
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
 input double         CircuitBreaker_ATR_Mult = 4.5;    // Closes all if a candle is > X times the average size.
 
@@ -131,7 +131,7 @@ input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main 
 input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
 
 // --- NEW: DYNAMIC SPREAD FILTER ---
-input bool           Use_Dynamic_Spread_Filter = true;  // Enable/disable the dynamic spread filter.
+input bool           Use_Dynamic_Spread_Filter = false;  // Enable/disable the dynamic spread filter.
 input int            Avg_Spread_Lookback_Bars  = 20;    // Number of bars to calculate average spread.
 input double         Spread_Filter_Multiplier  = 3.0;   // Block if current spread > AvgSpread * Multiplier.
 
@@ -1656,6 +1656,19 @@ int CountPendingThisEA()
 // ====================== FINAL CORRECTED TryScalpEntries() FUNCTION ======================
 void TryScalpEntries()
 {
+    // ====================== PER-BAR + COOLDOWN GUARDS (SCALP) ======================
+        // This internal guard is a safety net in case OnTick calls it too often.
+        static datetime lastEvalBarScalp = 0;
+        datetime barTime = iTime(_Symbol, TF_Scalp, 0); // Use TF_Scalp for this function
+        if(barTime == lastEvalBarScalp) return; // Already evaluated this scalp bar
+        lastEvalBarScalp = barTime;
+
+        // Use the GLOBAL cooldown timer (lastTradeBarTime is set by both TryEntries and TryScalpEntries)
+        // Check cooldown based on SCALP bar frequency
+        if(lastTradeBarTime != 0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Scalp) * Cooldown_Bars)
+            return; // Still in cooldown from the last trade (main or scalp)
+        // ======================================================================
+    
     if(!Use_Scalp_Mode) return;
     // --- NEW: TIME FILTER CHECK ---
     if (!IsTradeTime()) { return; }
@@ -1969,7 +1982,8 @@ void TryScalpEntries()
 
             if (orderSent)
             {
-                SendTG(StringFormat("✅ Scalp %s %s placed at %.5f", buy ? "BUY" : "SELL", entryType, entryPrice));
+                SendTG(StringFormat("✅ Scalp %s %s placed at %.5f", buy?"BUY":"SELL", entryType, entryPrice));
+                               lastTradeBarTime = barTime; // <-- MAKE SURE THIS LINE IS PRESENT
             }
             else
             {
@@ -1981,26 +1995,31 @@ void TryScalpEntries()
 // ====================== EA Entries ======================
 void TryEntries()
 {
-    // --- NEW: TIME FILTER CHECK ---
-    if (!IsTradeTime())
-    {
-        return; // Not within the allowed trading session
-    }
-    // --- END TIME FILTER ---
+    
     // ====================== PER-BAR + COOLDOWN GUARDS ======================
-    static datetime lastEvalBar = 0;
-    datetime barTime = iTime(_Symbol, TF_Trade, 0);
-    if(barTime == lastEvalBar) return; // evaluate once per bar max
-    lastEvalBar = barTime;
-    if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
-        return; // enforce N-bar cooldown after a fill
-    // ======================================================================
+        // Keep THIS block (Lines ~602-605)
+        static datetime lastEvalBar = 0; // Declared ONCE here
+        datetime barTime = iTime(_Symbol, TF_Trade, 0); // Declared ONCE here
+        if(barTime == lastEvalBar) return;
+        lastEvalBar = barTime;
+        if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
+            return;
+        // ======================================================================
 
-    // Cooldown after last trade bar (legacy guard)
-    if(lastTradeBarTime == barTime) return;
+        // --- NEW: TIME FILTER CHECK --- (Starts around line ~606)
+        if (!IsTradeTime())
+        {
+            return;
+        }
+        // --- END TIME FILTER ---
 
-    // --- NEW: Check Momentum Cooldown Status ---
-    bool isCooldownActive = false;
+        // <<< Make sure the duplicate PER-BAR block from lines ~607-610 is DELETED >>>
+
+        // Cooldown after last trade bar (legacy guard) - This check might be redundant now, but keep it for safety.
+        if(lastTradeBarTime == barTime) return; // (Line ~611)
+
+        // --- NEW: Check Momentum Cooldown Status --- (Starts around line ~612)
+        bool isCooldownActive = false;
     int  currentEntryMode = Entry_Mode; // Use the user's setting by default
     if (g_momentumCooldownActive)
     {
@@ -2829,6 +2848,84 @@ string GetDeinitReason(int reason)
     }
 }
 
+// Minimal OnTick glue to ensure trading logic runs on each new candle/tick
+//+------------------------------------------------------------------+
+//| OnTick - CORRECTED VERSION                                       |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // --- Part 1: Logic that runs on EVERY tick (Circuit Breaker) ---
+    if(Use_Volatility_CircuitBreaker)
+    {
+        // Cooldown timer to prevent it from firing repeatedly on the same candle
+        static datetime lastBreakerTripTime = 0;
+        if(TimeCurrent() - lastBreakerTripTime < 60) // 60-second cooldown
+        {
+            return; // Still in cooldown, do nothing
+        }
+
+        // Get current candle size and ATR on the main trading timeframe
+        // Use Bar 0 (current, incomplete bar) for immediate reaction
+        double high0 = iHigh(_Symbol, TF_Trade, 0);
+        double low0  = iLow(_Symbol, TF_Trade, 0);
+        double candleSize = high0 - low0;
+
+        double atr = 0;
+        int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period);
+        if(hATR != INVALID_HANDLE)
+        {
+            double a[];
+            // Use Bar 1 (last closed bar) for stable ATR calculation
+            if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0];
+            IndicatorRelease(hATR);
+        }
+
+        // Check if the circuit breaker condition is met
+        if(atr > 0 && candleSize > (atr * CircuitBreaker_ATR_Mult))
+        {
+            if(PositionsTotal() > 0) // Only fire if there are open positions
+            {
+                EmergencyCloseAllPositions("Extreme candle volatility detected.");
+                lastBreakerTripTime = TimeCurrent(); // Start the cooldown
+                return; // Stop further processing on this tick
+            }
+        }
+    } // End Circuit Breaker Check
+
+    // --- Part 2: Logic that runs ONCE per NEW BAR for each timeframe ---
+
+    // --- Main Strategy Bar Check (TF_Trade) ---
+    static datetime lastMainBarTime = 0;
+    datetime currentMainBarTime = iTime(_Symbol, TF_Trade, 0);
+
+    if(currentMainBarTime != lastMainBarTime)
+    {
+        lastMainBarTime = currentMainBarTime; // Update time for next check
+
+        // Run functions related to the MAIN strategy timeframe
+        TryEntries();             // Check main entries
+        ManagePendingOrders();    // Check pending orders (uses main/scalp cancel TFs internally)
+        ManageRetraceLimitOrders(); // Check retracement orders (uses main cancel TF internally)
+        TouchUpManualInitial();   // Check manual trades
+        ManageOpenPositions();    // Manage SL/TP/Trailing for ALL open positions
+    }
+
+    // --- Scalp Strategy Bar Check (TF_Scalp) ---
+    static datetime lastScalpBarTime = 0;
+    datetime currentScalpBarTime = iTime(_Symbol, TF_Scalp, 0);
+
+    if(Use_Scalp_Mode && currentScalpBarTime != lastScalpBarTime)
+    {
+        lastScalpBarTime = currentScalpBarTime; // Update time for next check
+
+        // Run functions related ONLY to the SCALP strategy timeframe
+        TryScalpEntries();        // Check scalp entries
+        // Note: ManageOpenPositions is run on the main bar check,
+        // as it needs to manage both types potentially.
+    }
+
+} // End OnTick()
+//+------------------------------------------------------------------+
 
 // REPLACEMENT FOR OnDeinit() FUNCTION
 void OnDeinit(const int reason)
@@ -3155,3 +3252,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         }
     }
 }
+
+//+------------------------------------------------------------------+
+//| ChartEvent                                                       |
+//+------------------------------------------------------------------+
+// We don't use ChartEvent, so we can keep this function empty
+// void OnChartEvent(const int id,
+//                   const long &lparam,
+//                   const double &dparam,
+//                   const string &sparam)
+// {
+// }
+
+
