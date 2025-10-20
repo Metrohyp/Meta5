@@ -2483,7 +2483,7 @@ void ManageOpenPositions()
                 // If the main trend flips, close ALL positions (main, scalp, manual).
                 // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1; // <-- KEEP THIS COMMENTED
                 
-                if (main_st_dir != requiredDir)                          // <-- UNCOMMENTED
+        if (prevDir_ST != 0 && main_st_dir != requiredDir)                         // <-- UNCOMMENTED
                 {                                                        // <-- UNCOMMENTED
                     if (Trade.PositionClose(ticket))
                                    {
@@ -2530,11 +2530,9 @@ void ManageOpenPositions()
                                    continue; // Position is closed, move to the next one.
                 }                                                        // <-- UNCOMMENTED
         
-        
+                
         // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
-        
-        // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
-        if (isScalp && scalp_st_dir != requiredDir)
+        if (isScalp && prevDir_ST != 0 && scalp_st_dir != requiredDir)
         {
             if (Trade.PositionClose(ticket))
             {
@@ -3153,7 +3151,6 @@ bool IsLeapYear(int year)
     return (year%4==0 && (year%100!=0 || year%400==0));
 }
 
-// REPLACEMENT FOR OnTradeTransaction() FUNCTION
 // REPLACEMENT FOR OnTradeTransaction() FUNCTION
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest      &req,
