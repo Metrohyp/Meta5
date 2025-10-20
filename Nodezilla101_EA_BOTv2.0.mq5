@@ -93,6 +93,11 @@ input double         BE_Activation_TP_Percent = 15.0; // Move SL to BE when trad
 input double         BE_Profit_Percent        = 5.0;  // lock in at BE profit (as % of TP).
 input double         BE_Buffer_Points         = 100.0; // Profit gap in points for BE (e.g., 100)
 
+// --- NEW: PARTIAL CLOSE AT TP ---
+input bool           Use_Partial_Close         = true;  // Enable partial closing near TP
+input double         Partial_Close_TP_Percent  = 90.0;  // Trigger partial close at X% of the way to TP
+input double         Partial_Close_Volume_Percent = 50.0; // Close X% of the position volume
+
 // --- Emergency Exit ---
 input bool           Use_Volatility_Entry_Filter = true; // Block new entries if last candle was too big
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
@@ -247,6 +252,8 @@ bool g_breakoutConfirmed = false; // NEW: Flag to track if a clean breakout is c
 // NEW: Flags for Momentum Cooldown
 bool     g_momentumCooldownActive = false;
 datetime g_cooldownStartTime      = 0;
+ulong g_partialClosedTickets[]; // Array to track tickets that have been partially closed
+bool sent = false;
 //============================== Utils ===============================
 string tfstr(ENUM_TIMEFRAMES tf)
 {
@@ -611,10 +618,9 @@ void ManageRetraceLimitOrders()
 {
     if (!Use_Retrace_Limit_Entry || CountPendingThisEA() != 1)
     {
-        return; // Feature is off, or we don't have exactly one pending order.
+        return;
     }
     
-    // --- Find our single pending stop order and get its properties ---
     ulong  stop_order_ticket = 0;
     long   stop_order_type = 0;
     double stop_order_sl = 0;
@@ -630,21 +636,19 @@ void ManageRetraceLimitOrders()
                 stop_order_type = OrderGetInteger(ORDER_TYPE);
                 stop_order_sl = OrderGetDouble(ORDER_SL);
                 stop_order_tp = OrderGetDouble(ORDER_TP);
-                break; // Found it
+                break;
             }
         }
     }
     
-    if (stop_order_ticket == 0 || stop_order_sl <= 0 || stop_order_tp <= 0) return; // No valid pending order found.
+    if (stop_order_ticket == 0 || stop_order_sl <= 0 || stop_order_tp <= 0) return;
     
-    // --- Find the retrace entry point using our new smart function ---
     double limit_price = 0;
     if(!FindRetraceEntryWithinRange(stop_order_type, stop_order_sl, stop_order_tp, limit_price))
     {
-        return; // No valid retrace entry found within the range.
+        return;
     }
     
-    // --- Calculate the new SL and TP for this new limit order ---
     double new_sl = 0, new_tp = 0;
     bool isBuy = (stop_order_type == ORDER_TYPE_BUY_STOP);
     
@@ -652,7 +656,6 @@ void ManageRetraceLimitOrders()
     if(!GetSwingsATR(TF_Main_Cancel_Gate, 300, ST_ATR_Period, pH, pL, atr)) return;
     if(!BuildSLTP_FromSwings(isBuy, limit_price, pH, pL, atr, Use_Fib_Targets, RR_Min, new_sl, new_tp)) return;
     
-    // --- Place the New Limit Order ---
     double lots = LotsByRisk(Risk_Percent, MathAbs(limit_price - new_sl) / _Point);
     if(lots <= 0) lots = Fixed_Lots;
     
@@ -707,9 +710,8 @@ bool FindRetraceEntryWithinRange(long tradeType, double rangeBottom, double rang
 // NEW, UPGRADED FUNCTION: Manages pending orders based on their type (Main vs. Scalp).
 void ManagePendingOrders()
 {
-    if (!Cancel_Pending_On_Flip) return; // Only run if the feature is enabled.
+    if (!Cancel_Pending_On_Flip) return;
     
-    // Get the current SuperTrend direction for BOTH gate timeframes.
     double st_main_line;
     int st_main_dir;
     if (!CalcSuperTrend(TF_Main_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_main_line, st_main_dir)) return;
@@ -718,7 +720,6 @@ void ManagePendingOrders()
     int st_scalp_dir;
     if (!CalcSuperTrend(TF_Scalp_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_scalp_line, st_scalp_dir)) return;
     
-    // Loop through all pending orders.
     for (int i = OrdersTotal() - 1; i >= 0; i--)
     {
         ulong ticket = OrderGetTicket(i);
@@ -730,18 +731,16 @@ void ManagePendingOrders()
                 string comment   = OrderGetString(ORDER_COMMENT);
                 bool   isScalp   = (StringFind(comment, "Scalp", 0) >= 0);
                 
-                // *** THE CORE LOGIC CHANGE ***
-                // Choose the correct trend direction and timeframe based on whether the order is a scalp or not.
                 int relevantST_dir = isScalp ? st_scalp_dir : st_main_dir;
                 ENUM_TIMEFRAMES relevant_TF = isScalp ? TF_Scalp_Cancel_Gate : TF_Main_Cancel_Gate;
                 
                 bool isBuyOrder  = (orderType == ORDER_TYPE_BUY_STOP || orderType == ORDER_TYPE_BUY_LIMIT);
                 bool isSellOrder = (orderType == ORDER_TYPE_SELL_STOP || orderType == ORDER_TYPE_SELL_LIMIT);
                 
-                // If the order direction mismatches its relevant trend, cancel it.
                 if ((isBuyOrder && relevantST_dir < 0) || (isSellOrder && relevantST_dir > 0))
                 {
-                    if (Trade.OrderDelete(ticket))
+                    Trade.OrderDelete(ticket);
+                    if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
                     {
                         SendTG(StringFormat("🔵 <b>PENDING ORDER CANCELED</b>\n\n"
                                             "📊 <b>Symbol:</b> %s\n"
@@ -1242,11 +1241,11 @@ void EmergencyCloseAllPositions(const string reason)
         {
             if(PositionGetString(POSITION_SYMBOL) == _Symbol)
             {
-                Trade.PositionClose(ticket, 10); // Close with 10 points of slippage tolerance
+                Trade.PositionClose(ticket, 10);
             }
         }
     }
-    // Send a single alert after trying to close all
+    
     string alertMsg = StringFormat(
                                    "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
                                    "📊 <b>Symbol:</b> %s\n"
@@ -1348,7 +1347,8 @@ void TouchUpManualInitial()
                 bool changed = ( (modSL>0 && MathAbs(modSL-curSL) >= 0.5*_Point) ||
                                 (modTP>0 && MathAbs(modTP-curTP) >= 0.5*_Point) );
                 
-                if(changed && Trade.PositionModify(_Symbol, modSL, modTP))
+                Trade.PositionModify(_Symbol, modSL, modTP);
+                if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
                 {
                     SendTG(StringFormat("🔧 Manual %s on %s: set %s%s\nSL: %.2f  TP: %.2f",
                                         isBuy?"BUY":"SELL", _Symbol,
@@ -1399,7 +1399,8 @@ void CloseOpenTrendPositions(long currentTradeType)
         // Check if it's a TREND trade (main magic) and OPPOSITE to the upcoming reversal
         if(magic == Magic && posType != currentTradeType)
         {
-            if(Trade.PositionClose(ticket, 10)) // Close with slippage
+            Trade.PositionClose(ticket, 10);
+            if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
             {
                 string posDir = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
                 SendTG(StringFormat("⚠️ Closed Trend %s Trade (Magic %d) in anticipation of Scalp Reversal.", posDir, Magic));
@@ -1483,6 +1484,93 @@ double NormalizeVolume(double v){
     if(v>maxv) v=maxv;
     return v;
 }
+
+// ==== ADD PARTIAL CLOSE FUNCTIONS RIGHT HERE ====
+
+// Add this helper function to check if a ticket is in the partial closed array
+bool IsTicketPartiallyClosed(ulong ticket)
+{
+    for(int i = 0; i < ArraySize(g_partialClosedTickets); i++)
+    {
+        if(g_partialClosedTickets[i] == ticket)
+            return true;
+    }
+    return false;
+}
+
+// Add this helper function to add a ticket to the partial closed array
+void AddToPartialClosed(ulong ticket)
+{
+    int size = ArraySize(g_partialClosedTickets);
+    ArrayResize(g_partialClosedTickets, size + 1);
+    g_partialClosedTickets[size] = ticket;
+}
+
+// Add this function to handle partial closing
+void CheckPartialClose(ulong ticket, long type, double entry, double sl, double tp, double volume, string comment)
+{
+    if(!Use_Partial_Close) return;
+    if(IsTicketPartiallyClosed(ticket)) return;
+    
+    double currentPrice = (type == POSITION_TYPE_BUY) ?
+                         SymbolInfoDouble(_Symbol, SYMBOL_BID) :
+                         SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    double progress = 0.0;
+    if(type == POSITION_TYPE_BUY)
+    {
+        if(tp > entry && currentPrice > entry)
+        {
+            progress = (currentPrice - entry) / (tp - entry) * 100.0;
+        }
+    }
+    else // SELL
+    {
+        if(tp < entry && currentPrice < entry)
+        {
+            progress = (entry - currentPrice) / (entry - tp) * 100.0;
+        }
+    }
+    
+    if(progress >= Partial_Close_TP_Percent)
+    {
+        double closeVolume = volume * (Partial_Close_Volume_Percent / 100.0);
+        closeVolume = NormalizeVolume(closeVolume);
+        
+        double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+        if(closeVolume >= minVolume && closeVolume < volume)
+        {
+            Trade.PositionClosePartial(ticket, closeVolume);
+            if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
+            {
+                AddToPartialClosed(ticket);
+                
+                string msg = StringFormat(
+                    "💰 <b>PARTIAL CLOSE EXECUTED</b>\n\n"
+                    "📊 <b>Symbol:</b> %s\n"
+                    "🔢 <b>Ticket:</b> %I64u\n"
+                    "📈 <b>Type:</b> %s\n"
+                    "⚡ <b>Progress to TP:</b> %.1f%%\n"
+                    "📦 <b>Volume Closed:</b> %.2f lots (%.1f%%)\n"
+                    "🎯 <b>Remaining Volume:</b> %.2f lots\n"
+                    "💬 <b>Comment:</b> %s",
+                    _Symbol,
+                    ticket,
+                    (type == POSITION_TYPE_BUY) ? "BUY" : "SELL",
+                    progress,
+                    closeVolume,
+                    Partial_Close_Volume_Percent,
+                    volume - closeVolume,
+                    comment
+                );
+                SendTG(msg);
+            }
+        }
+    }
+}
+
+// ==== CONTINUE WITH EXISTING CODE ====
+
 
 // Compute lot size by risk percent and SL points (simplified, Deriv synthetics)
 double LotsByRisk(double riskPct, double slPoints)
@@ -1828,37 +1916,68 @@ void TryScalpEntries()
     double lots = useFixedLot ? NormalizeVolume(fixedLots) : LotsByRisk(rp, riskPtsForLots);
 
     // --- Send Signal Alert & Execute Trade ---
-    string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
-    string signalMsg = StringFormat(
-                                    "<b>%s</b> (%s)\n\n"
-                                    "📊 <b>Symbol:</b> %s\n"
-                                    "⏰ <b>Timeframe:</b> %s\n"
-                                    "💰 <b>Entry Price:</b> %s\n"
-                                    "⚡ <b>Strategy:</b> Scalp%s\n\n" // Include suffix here if needed
-                                    "<i>Preparing to execute trade...</i>",
-                                    signalType, entryType,
-                                    _Symbol,
-                                    tfstr(TF_Scalp),
-                                    DoubleToString(entryPrice, _Digits),
-                                    commentSuffix // Show if it's a special reversal
-                                    );
-    SendTG(signalMsg);
-    if (Auto_Trade) {
-        Trade.SetExpertMagicNumber(magicToUse);
-        bool sent = false;
-        if (entryType == "Market") {
-            if (buy) sent = Trade.Buy(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Buy%s", commentSuffix));
-            else sent = Trade.Sell(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Sell%s", commentSuffix));
-        } else { // Limit
-            ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
-            datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
-            if (buy) sent = Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Buy Limit%s", commentSuffix));
-            else sent = Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Sell Limit%s", commentSuffix));
-        }
-        if(sent) { SendTG(StringFormat("✅ Scalp %s %s placed at %.5f", buy?"BUY":"SELL", entryType, entryPrice)); }
+        string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
+        string signalMsg = StringFormat(
+                                        "<b>%s</b> (%s)\n\n"
+                                        "📊 <b>Symbol:</b> %s\n"
+                                        "⏰ <b>Timeframe:</b> %s\n"
+                                        "💰 <b>Entry Price:</b> %s\n"
+                                        "⚡ <b>Strategy:</b> Scalp%s\n\n"
+                                        "<i>Preparing to execute trade...</i>",
+                                        signalType, entryType,
+                                        _Symbol,
+                                        tfstr(TF_Scalp),
+                                        DoubleToString(entryPrice, _Digits),
+                                        commentSuffix
+                                        );
+        SendTG(signalMsg);
+
+        if (Auto_Trade)
+        {
+            Trade.SetExpertMagicNumber(magicToUse);
+            bool orderSent = false; // <<< FIX: Declared locally
+
+            if (entryType == "Market")
+            {
+                if (buy)
+                {
+                    Trade.Buy(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Buy%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                }
+                else
+                {
+                    Trade.Sell(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Sell%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                }
+            }
+            else // "Limit"
+            {
+                ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
+                datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
+
+                if (buy)
+                {
+                    Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Buy Limit%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                }
+                else
+                {
+                    Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Sell Limit%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                }
+            }
+
+            if (orderSent)
+            {
+                SendTG(StringFormat("✅ Scalp %s %s placed at %.5f", buy ? "BUY" : "SELL", entryType, entryPrice));
+            }
+            else
+            {
+                SendTG(StringFormat("❌ Scalp %s %s failed: ret=%d", buy ? "BUY" : "SELL", entryType, Trade.ResultRetcode()));
+            }
+        } // <<< FIX: This closing brace was missing
     }
-}
-// ====================== END TryScalpEntries() FUNCTION ======================
+    // ====================== END TryScalpEntries() FUNCTION ======================// ====================== END TryScalpEntries() FUNCTION ======================
 // ====================== EA Entries ======================
 void TryEntries()
 {
@@ -2141,81 +2260,136 @@ void TryEntries()
             if((entry - sl) <= 0) return;
             if (tp <= entry) { SendTG(StringFormat("🚫 BUY REJECTED...\nSymbol: %s\nReason: Invalid TP (%.2f) <= entry (%.2f).", _Symbol, tp, entry)); return; }
             if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tolX); bool breakoutOK = (c >= (pH + Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
-            SendTG(StringFormat("📈 BUY Setup %s %s\nST:%s Alligator:bull AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
-                                         _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
-            if(Auto_Trade) {
-                Trade.SetExpertMagicNumber(magicToUse);
-                bool sent=false; double msgEntryPrice = entry;
-                if(Use_Pending_Stop_Entries) { // Pending Buy Stop
-                    if(CountPendingThisEA()>0) return;
-                    double hi1 = iHigh(_Symbol, TF_Trade, 1); double stopPrice = hi1 + StopEntry_Offset_ATR * atr;
-                    double riskPtsForLots = (stopPrice - sl) / _Point; double lots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                    msgEntryPrice = stopPrice;
-                    datetime expiration_buy = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-                    sent = Trade.BuyStop(lots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_buy, StringFormat("V25 BuyStop%s", commentSuffix));
-                    string buySignalMsg = StringFormat("🟢 BUY SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
-                                                       _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
-                    SendTG(buySignalMsg);
-                } else { // Market Buy
-                    double lots = LotsByRisk(Risk_Percent, (entry - sl)/_Point);
-                    sent = Trade.Buy(lots, _Symbol, entry, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
-                }
-                if(sent) { SendTG(StringFormat("[📈 BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp)); lastTradeBarTime = barTime; stageCount++; lastStageBar = barTime; if(Adjust_All_To_Latest) ApplySLTPToAllOpen(+1, sl, tp); }
-                else { SendTG(StringFormat("❌ BUY send failed: ret=%d", Trade.ResultRetcode())); }
-            }
-        }
-        else if(sellCond) // --- SELL ---
-        {
-            double entry = bid;
-            if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
-            else { sl = pH + ATR_SL_Buffer_Mult * atr; }
-            bool tpOk=false;
-            if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP; }
-            if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; } // Fib fallback
-            bool allowStage=false;
-            if(!Use_ST_Flip_Retest){ allowStage=true; }
-            else { // Check Retest Logic
-                 double tol = Retest_ATR_Tolerance * atr;
-                 bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol);
-                 bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr);
-                 bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway && flipWaitOK);
-                 if(stageCount==0) allowStage = (retestTouch && confirmOk);
-                 else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(-1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(-1, e0, sl0, AddEntry_Trigger_Ratio); allowStage = (retestTouch && confirmOk && nearSL); }
-            }
-            if(!allowStage || stageCount>=Max_Entry_Stages) return;
-            if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMax(sl, stLineM15 + stPad); }
-            { double minPtsSell = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point)); if( ((sl - entry)/_Point) < minPtsSell ) return; }
-            { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
-            if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
-            if((sl - entry) <= 0) return;
-            if (tp >= entry) { SendTG(StringFormat("🚫 SELL REJECTED...\nSymbol: %s\nReason: Invalid TP (%.2f) >= entry (%.2f).", _Symbol, tp, entry)); return; }
-            if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
-            SendTG(StringFormat("📉 SELL Setup %s %s\nST:%s Alligator:bear AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
-                                         _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
-            if(Auto_Trade) {
-                Trade.SetExpertMagicNumber(magicToUse);
-                bool sent=false; double msgEntryPrice = entry;
-                if(Use_Pending_Stop_Entries) { // Pending Sell Stop
-                    if(CountPendingThisEA()>0) return;
-                    double lo1 = iLow(_Symbol, TF_Trade, 1); double stopPrice = lo1 - StopEntry_Offset_ATR * atr;
-                    double riskPtsForLots = (sl - stopPrice) / _Point; double lots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                    msgEntryPrice = stopPrice;
-                    datetime expiration_sell = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-                    sent = Trade.SellStop(lots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_sell, StringFormat("V25 SellStop%s", commentSuffix));
-                     string sellSignalMsg = StringFormat("🔴 SELL SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
-                                                        _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
-                    SendTG(sellSignalMsg);
-                } else { // Market Sell
-                     double lots = LotsByRisk(Risk_Percent, (sl - entry)/_Point);
-                     sent = Trade.Sell(lots, _Symbol, entry, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
-                }
-                if(sent) { SendTG("[📉 SELL placed...]"); lastTradeBarTime = barTime; stageCount++; lastStageBar = barTime; if(Adjust_All_To_Latest) ApplySLTPToAllOpen(-1, sl, tp); }
-                else { SendTG(StringFormat("❌ SELL send failed: ret=%d", Trade.ResultRetcode())); }
-            }
-        }
-    }
-} // End of TryEntries
+            // --- Send Signal Alert ---
+                        SendTG(StringFormat("📈 BUY Setup %s %s\nST:%s Alligator:bull AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
+                                                     _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
 
+                        // --- Execute Trade ---
+                        if(Auto_Trade)
+                        {
+                            Trade.SetExpertMagicNumber(magicToUse);
+                            bool orderSent = false; // <<< FIX: Declared locally
+                            double msgEntryPrice = entry;
+
+                            if(Use_Pending_Stop_Entries)
+                            {
+                                if(CountPendingThisEA()>0) return; // Only one pending allowed
+                                double hi1 = iHigh(_Symbol, TF_Trade, 1);
+                                double stopPrice = hi1 + StopEntry_Offset_ATR * atr;
+                                double riskPtsForLots = (stopPrice - sl) / _Point;
+                                double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots);
+                                msgEntryPrice = stopPrice;
+                                datetime expiration_buy = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+
+                                Trade.BuyStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_buy, StringFormat("V25 BuyStop%s", commentSuffix));
+                                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
+
+                                // Send signal detected AFTER attempting trade
+                                string buySignalMsg = StringFormat("🟢 BUY SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
+                                                                   _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
+                                SendTG(buySignalMsg);
+                            }
+                            else // Market Entry
+                            {
+                                double orderLots = LotsByRisk(Risk_Percent, (entry - sl)/_Point);
+                                Trade.Buy(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
+                                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
+                            }
+
+                            if(orderSent)
+                            {
+                                SendTG(StringFormat("[📈 BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
+                                lastTradeBarTime = barTime;
+                                stageCount++;
+                                lastStageBar = barTime;
+                                if(Adjust_All_To_Latest) ApplySLTPToAllOpen(+1, sl, tp);
+                            }
+                            else
+                            {
+                                SendTG(StringFormat("❌ BUY send failed: ret=%d", Trade.ResultRetcode()));
+                            }
+                        } // <<< FIX: Correct closing brace for if(Auto_Trade)
+                    } // End of if(buyCond)
+                    // =============================== SELL ===============================
+                    else if(sellCond)
+                    {
+                        double entry = bid;
+                        // --- SL Calculation ---
+                        if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
+                        else { sl = pH + ATR_SL_Buffer_Mult * atr; }
+                        // --- TP Calculation ---
+                        bool tpOk=false;
+                        if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP; }
+                        if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; }
+                        // --- Staging Logic ---
+                        bool allowStage=false;
+                        if(!Use_ST_Flip_Retest){ allowStage=true; }
+                        else { double tol = Retest_ATR_Tolerance * atr; bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol); bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr); bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway && flipWaitOK);
+                             if(stageCount==0) allowStage = (retestTouch && confirmOk);
+                             else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(-1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(-1, e0, sl0, AddEntry_Trigger_Ratio); allowStage = (retestTouch && confirmOk && nearSL); }
+                        }
+                        if(!allowStage || stageCount>=Max_Entry_Stages) return;
+                        // --- Final SL/TP Adjustments & Checks ---
+                        if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMax(sl, stLineM15 + stPad); }
+                        { double minPtsSell = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point)); if( ((sl - entry)/_Point) < minPtsSell ) return; }
+                        { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
+                        if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
+                        if((sl - entry) <= 0) return;
+                        if (tp >= entry) { SendTG(StringFormat("🚫 SELL REJECTED...\nSymbol: %s\nReason: Invalid TP (%.2f) >= entry (%.2f).", _Symbol, tp, entry)); return; }
+                        if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
+
+                        // --- Send Signal Alert ---
+                        SendTG(StringFormat("📉 SELL Setup %s %s\nST:%s Alligator:bear AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
+                                                     _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
+
+                        // --- Execute Trade ---
+                        if(Auto_Trade)
+                        {
+                            Trade.SetExpertMagicNumber(magicToUse);
+                            bool orderSent = false; // <<< FIX: Declared locally
+                            double msgEntryPrice = entry;
+
+                            if(Use_Pending_Stop_Entries) // Pending Sell Stop
+                            {
+                                if(CountPendingThisEA()>0) return; // Only one pending allowed
+                                double lo1 = iLow(_Symbol, TF_Trade, 1);
+                                double stopPrice = lo1 - StopEntry_Offset_ATR * atr;
+                                double riskPtsForLots = (sl - stopPrice) / _Point;
+                                double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots); // <<< FIX: Correct variable name
+                                msgEntryPrice = stopPrice;
+                                datetime expiration_sell = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+
+                                Trade.SellStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_sell, StringFormat("V25 SellStop%s", commentSuffix));
+                                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
+
+                                // Send signal detected AFTER attempting trade
+                                string sellSignalMsg = StringFormat("🔴 SELL SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
+                                                                    _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
+                                SendTG(sellSignalMsg);
+                            }
+                            else // Market Sell
+                            {
+                                 double orderLots = LotsByRisk(Risk_Percent, (sl - entry)/_Point); // <<< FIX: Correct variable name
+                                 Trade.Sell(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
+                                 orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
+                            }
+
+                            if(orderSent)
+                            {
+                                SendTG(StringFormat("[📉 SELL placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp)); // <<< FIX: Added TP/SL/Entry
+                                lastTradeBarTime = barTime;
+                                stageCount++;
+                                lastStageBar = barTime;
+                                if(Adjust_All_To_Latest) ApplySLTPToAllOpen(-1, sl, tp);
+                            }
+                            else
+                            {
+                                SendTG(StringFormat("❌ SELL send failed: ret=%d", Trade.ResultRetcode()));
+                            }
+                        } // <<< FIX: Correct closing brace for if(Auto_Trade)
+                    } // End of else if(sellCond)
+                } // End of if(buyCond || sellCond)
+            } // End of TryEntries
 // Apply breakeven & trailing for open positions
 // UPGRADED ManageOpenPositions() FUNCTION WITH TIERED EXITS
 
@@ -2436,6 +2610,12 @@ void ManageOpenPositions()
         }
         // --- End of Breakeven Logic ---
         
+        // --- Partial Close Logic ---
+        if(!isScalp || !Protect_Scalp_SLTP) // Don't partial close protected scalp trades
+        {
+            CheckPartialClose(ticket, type, entry, sl, tp,
+                             PositionGetDouble(POSITION_VOLUME), pcomment);
+        }
         
         // --- Manual HALF-STEP trailing (adds; mirrors main, skips scalps & EA mains)
         if(Use_HalfStep_Trailing && ApplyToManualTrades && isManual && tp>0.0 && sl>0.0)
@@ -2831,7 +3011,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         string sym       = (string)HistoryDealGetString (deal, DEAL_SYMBOL);
         if(sym != _Symbol) return;
         
-        // --- A) POSITION OPENED (FILL) ---
+        // --- A POSITION OPENED (FILL) ---
         if(entryType == DEAL_ENTRY_IN)
         {
             long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
