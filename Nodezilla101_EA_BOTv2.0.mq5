@@ -2485,35 +2485,99 @@ void ManageOpenPositions()
                 
                 if (main_st_dir != requiredDir)                          // <-- UNCOMMENTED
                 {                                                        // <-- UNCOMMENTED
-                   if (Trade.PositionClose(ticket))                      // <-- UNCOMMENTED
-                   {                                                     // <-- UNCOMMENTED
-                      SendTG(StringFormat("🛑 %s closed: MAIN TREND flipped on %s. Exit price %.2f", // <-- UNCOMMENTED
-                                          pcomment, tfstr(TF_Trade), cur));
-                   }                                                     // <-- UNCOMMENTED
-                   continue; // Position is closed, move to the next one. // <-- UNCOMMENTED
+                    if (Trade.PositionClose(ticket))
+                                   {
+                                       // --- Calculate Approximate P/L ---
+                                       double volume = PositionGetDouble(POSITION_VOLUME);
+                                       double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                                       double swap = PositionGetDouble(POSITION_SWAP);
+                                       // Commission is harder to get accurately before deal closure, using current value as estimate
+                                       double commission = PositionGetDouble(POSITION_COMMISSION);
+
+                                       double grossProfit = 0;
+                                       if (type == POSITION_TYPE_BUY) {
+                                           grossProfit = (cur - entry) * volume * contractSize;
+                                       } else { // SELL
+                                           grossProfit = (entry - cur) * volume * contractSize;
+                                       }
+                                       double netProfit = grossProfit + swap + commission; // Approximate Net P/L
+                                       string profitEmoji = (netProfit >= 0) ? "✅" : "❌";
+                                       string profitSign = (netProfit >= 0) ? "+" : "";
+                                       string typeStr = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+                                       // --- Send Detailed Alert ---
+                                       string flipMsg = StringFormat(
+                                           "🛑 <b>POSITION CLOSED (Trend Flip)</b> 🛑\n\n"
+                                           "📊 <b>Symbol:</b> %s\n"
+                                           "🔢 <b>Ticket:</b> %I64u\n"
+                                           "📈 <b>Type:</b> %s\n"
+                                           "💬 <b>Comment:</b> %s\n\n"
+                                           "▶️ <b>Entry:</b> %s\n"
+                                           "⏹️ <b>Exit:</b> %s\n"
+                                           "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                                           "⚡ <b>Reason:</b> MAIN TREND flipped on %s.",
+                                           _Symbol,
+                                           ticket,
+                                           typeStr,
+                                           pcomment, // Use the existing comment (e.g., "V25 Scalp Buy")
+                                           DoubleToString(entry, _Digits),
+                                           DoubleToString(cur, _Digits),
+                                           profitEmoji, profitSign, netProfit,
+                                           tfstr(TF_Trade) // Shows the timeframe where the flip occurred (H1)
+                                       );
+                                       SendTG(flipMsg);
+                                   }
+                                   continue; // Position is closed, move to the next one.
                 }                                                        // <-- UNCOMMENTED
         
         
         // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
         
-        // If this is a scalp trade AND the scalp trend has flipped, close ONLY this scalp trade.
-        
+        // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
         if (isScalp && scalp_st_dir != requiredDir)
-            
         {
-            
             if (Trade.PositionClose(ticket))
-                
             {
-                
-                SendTG(StringFormat("🛑 %s closed: SCALP TREND flipped on %s. Exit price %.2f",
-                                    
-                                    pcomment, tfstr(TF_Scalp), cur));
-                
+                // --- Calculate Approximate P/L ---
+                double volume = PositionGetDouble(POSITION_VOLUME);
+                double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                double swap = PositionGetDouble(POSITION_SWAP);
+                double commission = PositionGetDouble(POSITION_COMMISSION); // Estimate
+
+                double grossProfit = 0;
+                if (type == POSITION_TYPE_BUY) {
+                    grossProfit = (cur - entry) * volume * contractSize;
+                } else { // SELL
+                    grossProfit = (entry - cur) * volume * contractSize;
+                }
+                double netProfit = grossProfit + swap + commission; // Approximate Net P/L
+                string profitEmoji = (netProfit >= 0) ? "✅" : "❌";
+                string profitSign = (netProfit >= 0) ? "+" : "";
+                string typeStr = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+                // --- Send Detailed Alert ---
+                string scalpFlipMsg = StringFormat(
+                    "🛑 <b>SCALP CLOSED (Trend Flip)</b> 🛑\n\n"
+                    "📊 <b>Symbol:</b> %s\n"
+                    "🔢 <b>Ticket:</b> %I64u\n"
+                    "📈 <b>Type:</b> %s\n"
+                    "💬 <b>Comment:</b> %s\n\n"
+                    "▶️ <b>Entry:</b> %s\n"
+                    "⏹️ <b>Exit:</b> %s\n"
+                    "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                    "⚡ <b>Reason:</b> SCALP TREND flipped on %s.",
+                    _Symbol,
+                    ticket,
+                    typeStr,
+                    pcomment, // Use the existing comment (e.g., "V25 Scalp Buy")
+                    DoubleToString(entry, _Digits),
+                    DoubleToString(cur, _Digits),
+                    profitEmoji, profitSign, netProfit,
+                    tfstr(TF_Scalp) // Shows the timeframe where the scalp flip occurred
+                );
+                SendTG(scalpFlipMsg);
             }
-            
             continue; // Position is closed, move to the next one.
-            
         }
         
         
@@ -2549,10 +2613,11 @@ void ManageOpenPositions()
                         if(Trade.PositionClose(ticket))
                         {
                             // --- MODIFIED: Use correct timeframe in alert message ---
-                            SendTG(StringFormat("%s %s closed:\n"
-                                                "MOMENTUM DIVERGENCE\n"
-                                                "Detected on %s.\n" // <-- Uses dynamic timeframe
-                                                "💰 Profit/Loss: %s%.2f (Exit: %.2f)",
+                            SendTG(StringFormat("</b>%s %s closed:</b>\n"
+                                                "</b>MOMENTUM DIVERGENCE</b>\n"
+                                                "<b>Detected on</b>: %s.\n" // <-- Uses dynamic timeframe
+                                                "<b>💰 Profit/Loss:</b> %s%.2f"
+                                                "<b>(Exit: %.2f)</b>",
                                                 profitEmoji, pcomment,
                                                 tfstr(divergenceTF), // <-- Uses dynamic timeframe
                                                 profitSign, potentialNet, cur));
@@ -3212,19 +3277,55 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             else                                           reason = "Closed (Check Comment/Broker)";
 
             // --- Send the Telegram Alert ---
-            string closeMsg = StringFormat(
-                                           "%s **POSITION CLOSED**\n\n"
-                                           "📊 **Symbol:** %s\n"
-                                           "▶️ **Entry:** %s\n"
-                                           "💰 **Profit/Loss:** %s%.2f\n"
-                                           "⚡ **Reason:** %s",
-                                           net >= 0 ? "✅" : "❌",
-                                           _Symbol,
-                                           DoubleToString(entryPrice, _Digits),
-                                           net >= 0 ? "+" : "", net,
-                                           reason
-                                          );
-            SendTG(closeMsg);
+                    // Get additional details from the closing deal
+                    double exitPrice = HistoryDealGetDouble(deal, DEAL_PRICE);
+                    long   dealType  = HistoryDealGetInteger(deal, DEAL_TYPE); // Type of the closing deal itself
+                    string typeStr = ""; // Determine original trade type (Buy/Sell)
+                    string dealComment = HistoryDealGetString(deal, DEAL_COMMENT); // Get comment from deal
+
+                    // We need to find the original entry deal to determine Buy/Sell Type correctly
+                    // (entryPrice is already found above this block)
+                    // Loop through history again briefly to find entry deal based on PositionID
+                    long originalDealType = -1; // -1 = unknown, 0 = Buy, 1 = Sell
+                    for (int i = (int)HistoryDealsTotal() - 1; i >= 0; i--)
+                    {
+                        ulong d_ticket = HistoryDealGetTicket(i);
+                        if (d_ticket == 0) continue;
+                        if (HistoryDealGetInteger(d_ticket, DEAL_POSITION_ID) == positionID &&
+                            HistoryDealGetInteger(d_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+                        {
+                            originalDealType = HistoryDealGetInteger(d_ticket, DEAL_TYPE);
+                            // If comment wasn't set on closing deal, try getting it from entry deal
+                            if (dealComment == "" || dealComment == "tp" || dealComment == "sl") {
+                                dealComment = HistoryDealGetString(d_ticket, DEAL_COMMENT);
+                            }
+                            break;
+                        }
+                    }
+                    typeStr = (originalDealType == DEAL_TYPE_BUY) ? "BUY" : ((originalDealType == DEAL_TYPE_SELL) ? "SELL" : "Unknown");
+
+                    // Format the enhanced message
+                    string closeMsg = StringFormat(
+                                                   "%s <b>POSITION CLOSED</b>\n\n"
+                                                   "📊 <b>Symbol:</b> %s\n"
+                                                   "🔢 <b>Ticket:</b> %I64u\n" // Use Position ID as Ticket reference
+                                                   "📈 <b>Type:</b> %s\n"
+                                                   "💬 <b>Comment:</b> %s\n\n"
+                                                   "▶️ <b>Entry:</b> %s\n"
+                                                   "⏹️ <b>Exit:</b> %s\n"
+                                                   "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                                                   "⚡ <b>Reason:</b> %s",
+                                                   net >= 0 ? "✅" : "❌",
+                                                   _Symbol,
+                                                   positionID, // Use Position ID, as deal ticket refers to the close deal
+                                                   typeStr,
+                                                   dealComment, // Use comment retrieved
+                                                   DoubleToString(entryPrice, _Digits),
+                                                   DoubleToString(exitPrice, _Digits), // Use exit price from the closing deal
+                                                   net >= 0 ? "✅" : "❌", net >= 0 ? "+" : "", net,
+                                                   reason
+                                                   );
+                    SendTG(closeMsg);
         }
     }
     // --- Event Type 2: A PENDING ORDER WAS REMOVED ---
