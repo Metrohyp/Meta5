@@ -1647,18 +1647,20 @@ void TryScalpEntries()
         bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp);
 
         // --- Check WPR conditions ONLY if divergence found, for SPECIAL handling ---
-        double wprH4 = WPRValue(TF_HTF_Breakout, 1);    // H4 WPR
-        double wprH1 = WPRValue(TF_Scalp_Gate_HTF, 1); // H1 WPR (Scalp's HTF)
-        bool h1Overbought = (wprH1 > WPR_Overbought_Level);
-        bool h1Oversold   = (wprH1 < WPR_Oversold_Level);
-        bool h4Normal     = (wprH4 <= WPR_Overbought_Level && wprH4 >= WPR_Oversold_Level);
+                double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1); // Get H1 WPR (Scalp's HTF)
+                double wprM15  = WPRValue(TF_Scalp, 1);          // Get M15 WPR (Scalp's own TF)
+
+                // Conditions based on NEW logic: M15 extreme, H1 normal
+                bool m15Overbought = (wprM15 > WPR_Overbought_Level);
+                bool m15Oversold   = (wprM15 < WPR_Oversold_Level);
+                bool h1Normal      = (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
 
         // Evaluate BUY Reversal
         if (foundBuyDivergence && !buySignal)
         {
             buySignal = true; // Divergence buy signal exists
             // Check SPECIAL Scalp Reversal WPR condition (H1 Oversold, H4 Normal)
-            if (h1Oversold && h4Normal)
+            if (m15Oversold && h1Normal)
             {
                 magicToUse = Magic_Reversal;
                 commentSuffix = " Scalp Reversal";
@@ -1677,7 +1679,7 @@ void TryScalpEntries()
         {
             sellSignal = true; // Divergence sell signal exists
             // Check SPECIAL Scalp Reversal WPR condition (H1 Overbought, H4 Normal)
-            if (h1Overbought && h4Normal)
+            if (m15Overbought && h1Normal)
             {
                 magicToUse = Magic_Reversal;
                 commentSuffix = " Scalp Reversal";
@@ -2332,38 +2334,35 @@ void ManageOpenPositions()
         // ======================= MOMENTUM DIVERGENCE EXIT (TIER 1.5) =======================
                 if(Use_Momentum_Exit_Filter && isEA) // Only for EA trades, not manual
                 {
-                    if(CheckMomentumDivergence(type, Divergence_Lookback_Bars, TF_Trade))
-                    {
-                        // --- NEW: Calculate P/L Before Closing ---
-                                        double potentialProfit = 0;
-                                        // double commission = PositionGetDouble(POSITION_COMMISSION); // <-- MAKE SURE THIS IS COMMENTED OUT or DELETED
-                                        double swap = PositionGetDouble(POSITION_SWAP);
-                                        double fee = 0; // <-- ENSURE THIS LINE IS PRESENT AND UNCOMMENTED
+                    // --- NEW: Determine correct timeframe based on trade type ---
+                    ENUM_TIMEFRAMES divergenceTF = isScalp ? TF_Scalp : TF_Trade;
+                    // --- END NEW ---
 
-                                        if (type == POSITION_TYPE_BUY) {
-                                            potentialProfit = (cur - entry) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-                                        } else { // SELL
-                                            potentialProfit = (entry - cur) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-                                        }
-                                        // --- FIX: REMOVE 'commission' from this line ---
-                                        double potentialNet = potentialProfit + swap + fee;
-                                        // --- END FIX ---
+                    if(CheckMomentumDivergence(type, Divergence_Lookback_Bars, divergenceTF)) // <-- Uses dynamic timeframe
+                    {
+                        // --- Calculate P/L Before Closing ---
+                        double potentialProfit = 0;
+                        double swap = PositionGetDouble(POSITION_SWAP);
+                        double fee = 0;
+                        if (type == POSITION_TYPE_BUY) {
+                            potentialProfit = (cur - entry) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                        } else { // SELL
+                            potentialProfit = (entry - cur) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                        }
+                        double potentialNet = potentialProfit + swap + fee;
                         string profitEmoji = (potentialNet >= 0) ? "✅" : "❌";
                         string profitSign  = (potentialNet >= 0) ? "+" : "";
-                        // --- END P/L Calculation ---
 
                         if(Trade.PositionClose(ticket))
                         {
-                            // --- MODIFIED: Updated Alert Message ---
-                            SendTG(StringFormat("%s %s closed:\n" // Newline after "closed:"
-                                                                    "MOMENTUM DIVERGENCE\n" // Newline after "DIVERGENCE"
-                                                                    "Detected on %s.\n" // Newline after timeframe
-                                                                    "💰 Profit/Loss: %s%.2f (Exit: %.2f)",
-                                                                    profitEmoji,
-                                                                    pcomment,
-                                                                    tfstr(TF_Trade),
-                                                                    profitSign, potentialNet,
-                                                                    cur));
+                            // --- MODIFIED: Use correct timeframe in alert message ---
+                            SendTG(StringFormat("%s %s closed:\n"
+                                                "MOMENTUM DIVERGENCE\n"
+                                                "Detected on %s.\n" // <-- Uses dynamic timeframe
+                                                "💰 Profit/Loss: %s%.2f (Exit: %.2f)",
+                                                profitEmoji, pcomment,
+                                                tfstr(divergenceTF), // <-- Uses dynamic timeframe
+                                                profitSign, potentialNet, cur));
                             // --- END MODIFICATION ---
                         }
                         continue; // Position closed, move to next
@@ -2436,6 +2435,7 @@ void ManageOpenPositions()
             }
         }
         // --- End of Breakeven Logic ---
+        
         
         // --- Manual HALF-STEP trailing (adds; mirrors main, skips scalps & EA mains)
         if(Use_HalfStep_Trailing && ApplyToManualTrades && isManual && tp>0.0 && sl>0.0)
