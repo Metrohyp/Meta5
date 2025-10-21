@@ -32,7 +32,7 @@ input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF
 
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
-input double         Risk_Percent     = 2;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Risk_Percent     = 5;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
@@ -40,7 +40,7 @@ input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 2;      // if >0, overrides and uses this absolute % just for scalps
+input double         Risk_Percent_Scalp = 5;      // if >0, overrides and uses this absolute % just for scalps
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
@@ -124,12 +124,12 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input int            Max_Entry_Stages   = 20;        // Allow adding to a trade up to X times.
+input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
-input int            Scalp_Max_Concurrent = 10;      // Max number of simultaneous scalp trades.
+input int            Scalp_Max_Concurrent = 5;      // Max number of simultaneous scalp trades.
 
 // --- NEW: DYNAMIC SPREAD FILTER ---
 input bool           Use_Dynamic_Spread_Filter = false;  // Enable/disable the dynamic spread filter.
