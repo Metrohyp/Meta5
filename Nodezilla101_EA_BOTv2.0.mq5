@@ -124,12 +124,12 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input int            Max_Entry_Stages   = 20;        // Allow adding to a trade up to X times.
+input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
-input int            Scalp_Max_Concurrent = 10;      // Max number of simultaneous scalp trades.
+input int            Scalp_Max_Concurrent = 5;      // Max number of simultaneous scalp trades.
 
 // --- NEW: DYNAMIC SPREAD FILTER ---
 input bool           Use_Dynamic_Spread_Filter = false;  // Enable/disable the dynamic spread filter.
@@ -1673,34 +1673,24 @@ int CountPendingThisEA()
 
 
 
-//============================== Entry Logic =========================
-
-// ====================== SCALP ENTRIES ======================
-
 // ====================== FINAL CORRECTED TryScalpEntries() FUNCTION ======================
 void TryScalpEntries()
 {
     // ====================== PER-BAR + COOLDOWN GUARDS (SCALP) ======================
-        // This internal guard is a safety net in case OnTick calls it too often.
-        static datetime lastEvalBarScalp = 0;
-        datetime barTime = iTime(_Symbol, TF_Scalp, 0); // Use TF_Scalp for this function
-        if(barTime == lastEvalBarScalp) return; // Already evaluated this scalp bar
-        lastEvalBarScalp = barTime;
-
-        // Use the GLOBAL cooldown timer (lastTradeBarTime is set by both TryEntries and TryScalpEntries)
-        // Check cooldown based on SCALP bar frequency
-        if(lastTradeBarTime != 0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Scalp) * Cooldown_Bars)
-            return; // Still in cooldown from the last trade (main or scalp)
-        // ======================================================================
+    static datetime lastEvalBarScalp = 0;
+    datetime barTime = iTime(_Symbol, TF_Scalp, 0);
+    if(barTime == lastEvalBarScalp) return;
+    lastEvalBarScalp = barTime;
+    if(lastTradeBarTime != 0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Scalp) * Cooldown_Bars)
+        return;
+    // ======================================================================
     
     if(!Use_Scalp_Mode) return;
-    // --- NEW: TIME FILTER CHECK ---
     if (!IsTradeTime()) { return; }
-    // --- END TIME FILTER ---
     if(Scalp_Only_When_No_Main && CountOpen()>0) return;
     if(CountOpenByCommentSubstr("V25 Scalp") >= Scalp_Max_Concurrent) return;
 
-    // --- NEW: Check Momentum Cooldown Status ---
+    // --- Check Momentum Cooldown Status ---
     bool isCooldownActive = false;
     int  currentEntryMode = Entry_Mode;
     if (g_momentumCooldownActive) {
@@ -1709,38 +1699,29 @@ void TryScalpEntries()
         if (barsPassed >= Cooldown_Momentum_Bars) { g_momentumCooldownActive = false; }
         else { isCooldownActive = true; currentEntryMode = 1; }
     }
-    // --- End of New Block ---
     
-    // --- NEW: DYNAMIC SPREAD FILTER ---
-        if (Use_Dynamic_Spread_Filter && Avg_Spread_Lookback_Bars > 0 && Spread_Filter_Multiplier > 0)
+    // --- DYNAMIC SPREAD FILTER ---
+    if (Use_Dynamic_Spread_Filter && Avg_Spread_Lookback_Bars > 0 && Spread_Filter_Multiplier > 0)
+    {
+        double avgSpread = GetAverageSpreadBars(TF_Scalp, Avg_Spread_Lookback_Bars);
+        if (avgSpread > 0)
         {
-            double avgSpread = GetAverageSpreadBars(TF_Scalp, Avg_Spread_Lookback_Bars);
-            if (avgSpread > 0) // Only filter if average spread calculation is valid
+            double currentSpreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            if (currentSpreadPoints > (avgSpread * Spread_Filter_Multiplier))
             {
-                double currentSpreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD); // Explicitly cast integer to double
-                if (currentSpreadPoints > (avgSpread * Spread_Filter_Multiplier))
-                {
-                    // Optional: Print notification
-                    // PrintFormat("Scalp entry blocked by dynamic spread: %.1f points (Avg: %.1f, Max Allowed: %.1f)",
-                    //             currentSpreadPoints, avgSpread, avgSpread * Spread_Filter_Multiplier);
-                    return; // Spread is too wide, block scalp entry
-                }
+                return; // Spread is too wide
             }
         }
-        // --- END DYNAMIC SPREAD FILTER ---
-    // --- NEW: VOLATILITY ENTRY FILTER ---
+    }
+    
+    // --- VOLATILITY ENTRY FILTER ---
     if(Use_Volatility_Entry_Filter) {
-        double atr = 0; int hATR = iATR(_Symbol, TF_Scalp, ST_ATR_Period); // Use TF_Scalp here
+        double atr = 0;
+        int hATR = iATR(_Symbol, TF_Scalp, ST_ATR_Period);
         if(hATR != INVALID_HANDLE){ double a[]; if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0]; IndicatorRelease(hATR); }
-        double lastCandleSize = iHigh(_Symbol, TF_Scalp, 1) - iLow(_Symbol, TF_Scalp, 1); // Use TF_Scalp here
+        double lastCandleSize = iHigh(_Symbol, TF_Scalp, 1) - iLow(_Symbol, TF_Scalp, 1);
         if(atr > 0 && lastCandleSize > (atr * CircuitBreaker_ATR_Mult)) { return; }
     }
-    // --- END NEW FILTER ---
-
-    // --- Magic Number Logic (Initialize) ---
-    long magicToUse = Magic;         // Default to main trend magic
-    string commentSuffix = "";       // Default suffix
-    bool isScalpReversalConditionMet = false; // Flag for special WPR condition
 
     // --- Get Core Indicator Data for Scalp ---
     double stLineScalp=0; int dirScalp=0;
@@ -1749,142 +1730,115 @@ void TryScalpEntries()
     double ao = AOValue(TF_Scalp,1);
     double mom = MomentumValue(TF_Scalp,1);
     double c  = iClose(_Symbol, TF_Scalp, 1);
-    double mainSTLine_ignored=0; int mainSTDir=0; // For breakout check later
+    double mainSTLine_ignored=0; int mainSTDir=0;
     if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, mainSTLine_ignored, mainSTDir)) return;
-    // Recalculate isTrendFlip based on mainSTDir and prevDir_ST from the main strategy context
-    bool isTrendFlip = (mainSTDir != 0 && mainSTDir != prevDir_ST); // Use global prevDir_ST
+    bool isTrendFlip = (mainSTDir != 0 && mainSTDir != prevDir_ST);
 
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-        bool buySignal = false;
-        bool sellSignal = false;
-        long magicToUse = Magic; // Default
-        string commentSuffix = ""; // Default
-        bool isScalpReversalConditionMet = false; // Default
+    bool buySignal = false;
+    bool sellSignal = false;
+    long magicToUse = Magic;
+    string commentSuffix = "";
+    bool isScalpReversalConditionMet = false;
 
-        // --- NEW: Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
-        if (currentEntryMode == 1 || currentEntryMode == 2) // Only check if reversals are allowed
+    // --- Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
+    if (currentEntryMode == 1 || currentEntryMode == 2)
+    {
+        double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1);
+        double wprM15  = WPRValue(TF_Scalp, 1);
+        bool wprBuyTriggerOK  = (wprM15 < WPR_Oversold_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
+        bool wprSellTriggerOK = (wprM15 > WPR_Overbought_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
+        bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+        bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+
+        if (wprBuyTriggerOK && buyMomentumConfirmOK)
         {
-            // Condition 1: Primary WPR Trigger
-            double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1);
-            double wprM15  = WPRValue(TF_Scalp, 1);
-            bool wprBuyTriggerOK  = (wprM15 < WPR_Oversold_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level); // M15 Extreme, H1 Normal
-            bool wprSellTriggerOK = (wprM15 > WPR_Overbought_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level); // M15 Extreme, H1 Normal
-
-            // Condition 2: Momentum Confirmation (Mandatory for Magic_Reversal)
-            bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
-            bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
-
-            // Check BUY Reversal based STRICTLY on WPR+Momentum
-            if (wprBuyTriggerOK && buyMomentumConfirmOK)
-            {
-                Print("TryScalp DEBUG: *** Magic_Reversal conditions MET for BUY (Strict WPR + Mom)! ***");
-                buySignal = true; // Set signal
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Scalp Reversal";
-                isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
-                CloseOpenTrendPositions(POSITION_TYPE_BUY);
-            }
-            // Check SELL Reversal based STRICTLY on WPR+Momentum
-            else if (wprSellTriggerOK && sellMomentumConfirmOK) // Use 'else if'
-            {
-                 Print("TryScalp DEBUG: *** Magic_Reversal conditions MET for SELL (Strict WPR + Mom)! ***");
-                sellSignal = true; // Set signal
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Scalp Reversal";
-                isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
-                CloseOpenTrendPositions(POSITION_TYPE_SELL);
-            }
-        } // End WPR+Momentum Reversal Check
-
-        // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
-        if (!buySignal && !sellSignal)
-        {
-            // Check Trend signals if allowed
-            if(currentEntryMode == 0 || currentEntryMode == 2)
-            {
-                if (dirScalp > 0 && c > stLineScalp) buySignal = true;
-                if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
-            }
-
-            // Check standard AO Divergence signals if allowed AND no trend/reversal signal yet found
-            // NOTE: This respects Use_AO_Filter
-            if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
-            {
-                if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp)) {
-                     buySignal = true; // Standard divergence buy signal (uses default Magic)
-                     Print("TryScalp DEBUG: Standard AO Buy Divergence detected.");
-                } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp)) {
-                     sellSignal = true; // Standard divergence sell signal (uses default Magic)
-                     Print("TryScalp DEBUG: Standard AO Sell Divergence detected.");
-                }
-            }
-        } // End check for Trend/Standard Divergence
-
-         // --- If NO signal found by now, exit ---
-        if (!buySignal && !sellSignal) {
-            // Optional Print: Print("TryScalp DEBUG: No valid entry signal found this bar.");
-            return;
+            buySignal = true;
+            magicToUse = Magic_Reversal;
+            commentSuffix = " Scalp Reversal";
+            isScalpReversalConditionMet = true;
+            CloseOpenTrendPositions(POSITION_TYPE_BUY);
         }
+        else if (wprSellTriggerOK && sellMomentumConfirmOK)
+        {
+            sellSignal = true;
+            magicToUse = Magic_Reversal;
+            commentSuffix = " Scalp Reversal";
+            isScalpReversalConditionMet = true;
+            CloseOpenTrendPositions(POSITION_TYPE_SELL);
+        }
+    }
+
+    // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
+    if (!buySignal && !sellSignal)
+    {
+        if(currentEntryMode == 0 || currentEntryMode == 2)
+        {
+            if (dirScalp > 0 && c > stLineScalp) buySignal = true;
+            if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
+        }
+        if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
+        {
+            if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp)) {
+                 buySignal = true;
+            } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp)) {
+                 sellSignal = true;
+            }
+        }
+    }
+    
+    if (!buySignal && !sellSignal) {
+        return;
+    }
 
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS (FIXED) =======================
     bool buyCond  = false;
     bool sellCond = false;
 
-    // --- Check if it's a special WPR Reversal ---
     if (isScalpReversalConditionMet)
     {
-        // For a WPR+Momentum reversal, the signal IS the confirmation.
-        // We bypass the standard Alligator/AO/Momentum trend filters.
         if (buySignal) buyCond = true;
         if (sellSignal) sellCond = true;
-        Print("TryScalp DEBUG: Magic_Reversal signal detected, bypassing standard filters.");
     }
     else
     {
-        // --- Standard Trend or AO Divergence signal, apply all filters ---
         bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
         bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-        bool momBuyOK  = !Use_Momentum_Filter ||
-                         (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
-        bool momSellOK = !Use_Momentum_Filter ||
-                         (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+        bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+        bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
         bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
         bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
         bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
         bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
 
-        // Combine filters for standard signals
-        // Note: We use 'buySignal' and 'sellSignal' from Step 1
         if (buySignal && alligatorBuyOK && finalAOBuyOK && momBuyOK) buyCond = true;
         if (sellSignal && alligatorSellOK && finalAOSellOK && momSellOK) sellCond = true;
     }
     
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
-        // --- Only apply standard filter if it's NOT our special Scalp Reversal ---
         if (!isScalpReversalConditionMet) {
             bool finalFilterOK = false;
-            bool trendAlignOK = false; // Check H4 Alignment
-            double htf_st_line_ignored; int htf_st_dir = 0;
-            if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir)) {
+            bool trendAlignOK = false;
+            int htf_st_dir = 0;
+            if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, mainSTLine_ignored, htf_st_dir)) {
                 if(buyCond && htf_st_dir > 0) trendAlignOK = true;
                 if(sellCond && htf_st_dir < 0) trendAlignOK = true;
             }
-            bool breakoutOK = false; // Check H1 Breakout Alignment
+            bool breakoutOK = false;
             int htfDir = 0, htfAge = 0;
             if(IsStrongBreakoutHTF(TF_Scalp_Gate_HTF, HTF_Breakout_Lookback, Scalp_ATR_Period, Scalp_Gate_ATR_Margin, 0, HTF_Breakout_MaxAgeBars, htfDir, htfAge)) {
                 if(buyCond && htfDir > 0) breakoutOK = true;
                 if(sellCond && htfDir < 0) breakoutOK = true;
             }
-            // Apply filter based on mode
             switch(HTF_Filter_Mode) {
                 case 0: finalFilterOK = trendAlignOK; break;
                 case 1: finalFilterOK = breakoutOK; break;
-                case 2: finalFilterOK = trendAlignOK && breakoutOK; break; // Default AND
+                case 2: finalFilterOK = trendAlignOK && breakoutOK; break;
             }
             if(!finalFilterOK) { buyCond = false; sellCond = false; }
-        } // End conditional filter
-    } else if (Directional_Filter_Mode == 1) { // Apply Scalp HTF Divergence Filter
+        }
+    } else if (Directional_Filter_Mode == 1) {
         int htfDivergenceBias = GetHTFDivergenceDirection(TF_Scalp_HTF_Divergence, Divergence_Lookback_Bars);
         if (htfDivergenceBias > 0) sellCond = false;
         if (htfDivergenceBias < 0) buyCond = false;
@@ -1893,10 +1847,28 @@ void TryScalpEntries()
     // --- Final Check ---
     if (!buyCond && !sellCond) return;
 
+    // ======================= STEP 3.5: BREAKOUT CONFIRMATION FILTER (CORRECTED) =======================
+    if (Use_Breakout_Confirmation && !isScalpReversalConditionMet)
+    {
+        bool breakoutConfirmed = false;
+        if (buyCond)
+        {
+            breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp);
+        }
+        else if (sellCond)
+        {
+            breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp);
+        }
+
+        if (!breakoutConfirmed)
+        {
+            return; // BLOCK THE TRADE
+        }
+    }
+    // --- End of Breakout Filter ---
+
     // =========================== BUILD SL / TP & EXECUTE ============================
-    // ---- ATR on scalp TF
-    int hATR = iATR(_Symbol, TF_Scalp, Scalp_ATR_Period);
-    double atr=0.0;
+    int hATR = iATR(_Symbol, TF_Scalp, Scalp_ATR_Period); double atr=0.0;
     if(hATR!=INVALID_HANDLE){ double a[]; ArraySetAsSeries(a,true); if(CopyBuffer(hATR,0,0,3,a)>=2) atr=a[1]; IndicatorRelease(hATR); }
     if(atr<=0) return;
     double ask  = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
@@ -1906,7 +1878,6 @@ void TryScalpEntries()
     int bH,bL; double pHs,pLs;
     if(!RecentSwings(TF_Scalp, 200, bH,pHs,bL,pLs)) { pHs=iHigh(_Symbol,TF_Scalp,1); pLs=iLow(_Symbol,TF_Scalp,1); }
 
-    // --- SL Calculation ---
     double sl=0.0;
     if(Use_Dynamic_SL_ATR){
         if(!PickSL_DynamicATR(buy, entry, atr, pHs, pLs, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return;
@@ -1914,10 +1885,9 @@ void TryScalpEntries()
         sl = buy? (entry - Scalp_SL_ATR_Mult*atr) : (entry + Scalp_SL_ATR_Mult*atr);
     }
 
-    // --- TP Calculation (Copy from Main or Calculate) ---
     double tp = 0.0;
     bool tpOk = false;
-    for(int i = PositionsTotal() - 1; i >= 0; i--) { // Search for open main trade TP
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
         if(PositionSelectByTicket(PositionGetTicket(i))) {
             if(PositionGetInteger(POSITION_MAGIC) == Magic && StringFind(PositionGetString(POSITION_COMMENT), "Scalp", 0) < 0) {
                  tp = PositionGetDouble(POSITION_TP);
@@ -1925,28 +1895,26 @@ void TryScalpEntries()
             }
         }
     }
-    if(!tpOk) { // Calculate theoretical main TP if none found
+    if(!tpOk) {
         double pH, pL, atrMain;
         if(GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH, pL, atrMain)) {
-            if(Use_RR_Range) { // Try RR Range first
+            if(Use_RR_Range) {
                 double chosenR=0, dynTP=0;
                 tpOk = PickRRTarget(buy, entry, sl, atrMain, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP);
                 if(tpOk) tp = dynTP;
             }
-            if(!tpOk) { // Fallback to Fib
+            if(!tpOk) {
                 double leg = MathAbs(pH - pL);
                 tp = buy ? (pH + 2.618 * leg) : (pL - 2.618 * leg);
             }
         }
     }
-    if(tp == 0.0) { SendTG(StringFormat("🚫 SCALP %s REJECTED...\nSymbol: %s\nReason: Failed TP calc.", buy ? "BUY" : "SELL", _Symbol)); return; }
+    if(tp == 0.0) { return; }
 
-    // --- Finalize SL/TP and Apply Pullback ---
     { double ssl=sl, stp=tp; SanitizeStops(buy?POSITION_TYPE_BUY:POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
     if(TP_Pullback_ATR_Mult > 0 && tp > 0) { if(buy) tp = tp - (TP_Pullback_ATR_Mult * atr); else tp = tp + (TP_Pullback_ATR_Mult * atr); }
     if( (buy && (entry - sl) <= 0) || (!buy && (sl - entry) <= 0) ) return;
-
-    // --- HYBRID ENTRY LOGIC (Market vs Limit) ---
+    
     double jaw, teeth, lips;
     if (!GetAlligatorLines(TF_Scalp, 1, jaw, teeth, lips)) return;
     double idealEntry = lips;
@@ -1956,126 +1924,118 @@ void TryScalpEntries()
     double entryPrice = 0.0;
     double finalSL = sl;
     double finalTP = tp;
-    if(Scalp_Market_Entry_ATR_Zone > 0 && inMarketZone) { // Market Entry
+    
+    if(Scalp_Market_Entry_ATR_Zone > 0 && inMarketZone) {
         entryType = "Market";
         entryPrice = entry;
-    } else { // Limit Entry
+    } else {
         entryType = "Limit";
         entryPrice = idealEntry;
         finalSL = buy ? (entryPrice - MathAbs(entry - sl)) : (entryPrice + MathAbs(sl - entry));
         finalTP = buy ? (entryPrice + MathAbs(tp - entry)) : (entryPrice - MathAbs(entry - tp));
-        if (buy && finalSL >= entryPrice) finalSL = entryPrice - 2.0 * atr; // Safety margin for limit SL
-        if (!buy && finalSL <= entryPrice) finalSL = entryPrice + 2.0 * atr; // Safety margin for limit SL
+        if (buy && finalSL >= entryPrice) finalSL = entryPrice - 2.0 * atr;
+        if (!buy && finalSL <= entryPrice) finalSL = entryPrice + 2.0 * atr;
         SanitizeStops(buy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, finalSL, finalTP);
     }
 
-    // --- Lot Sizing ---
     double riskPtsForLots = buy ? (entryPrice - finalSL) / _Point : (finalSL - entryPrice) / _Point;
     if (riskPtsForLots <= MinStopPoints()) return;
     double rp = (Risk_Percent_Scalp > 0) ? Risk_Percent_Scalp : Risk_Percent;
     bool useFixedLot = Scalp_Use_Fixed_Lot;
     double fixedLots = (Fixed_Lots_Scalp > 0.0 ? Fixed_Lots_Scalp : Fixed_Lots);
     double lots = useFixedLot ? NormalizeVolume(fixedLots) : LotsByRisk(rp, riskPtsForLots);
+    
+    string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
+    string signalMsg = StringFormat(
+                                    "<b>%s</b> (%s)\n\n"
+                                    "📊 <b>Symbol:</b> %s\n"
+                                    "⏰ <b>Timeframe:</b> %s\n"
+                                    "💰 <b>Entry Price:</b> %s\n"
+                                    "⚡ <b>Strategy:</b> Scalp%s\n\n"
+                                    "<i>Preparing to execute trade...</i>",
+                                    signalType, entryType,
+                                    _Symbol,
+                                    tfstr(TF_Scalp),
+                                    DoubleToString(entryPrice, _Digits),
+                                    commentSuffix
+                                    );
+    SendTG(signalMsg);
 
-    // --- Send Signal Alert & Execute Trade ---
-        string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
-        string signalMsg = StringFormat(
-                                        "<b>%s</b> (%s)\n\n"
-                                        "📊 <b>Symbol:</b> %s\n"
-                                        "⏰ <b>Timeframe:</b> %s\n"
-                                        "💰 <b>Entry Price:</b> %s\n"
-                                        "⚡ <b>Strategy:</b> Scalp%s\n\n"
-                                        "<i>Preparing to execute trade...</i>",
-                                        signalType, entryType,
-                                        _Symbol,
-                                        tfstr(TF_Scalp),
-                                        DoubleToString(entryPrice, _Digits),
-                                        commentSuffix
-                                        );
-        SendTG(signalMsg);
+    if (Auto_Trade)
+    {
+        Trade.SetExpertMagicNumber(magicToUse);
+        bool orderSent = false;
 
-        if (Auto_Trade)
+        if (entryType == "Market")
         {
-            Trade.SetExpertMagicNumber(magicToUse);
-            bool orderSent = false; // <<< FIX: Declared locally
-
-            if (entryType == "Market")
+            if (buy)
             {
-                if (buy)
-                {
-                    Trade.Buy(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Buy%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                }
-                else
-                {
-                    Trade.Sell(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Sell%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                }
-            }
-            else // "Limit"
-            {
-                ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
-                datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
-
-                if (buy)
-                {
-                    Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Buy Limit%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                }
-                else
-                {
-                    Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Sell Limit%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                }
-            }
-
-            if (orderSent)
-            {
-                SendTG(StringFormat("✅ Scalp %s %s placed at %.5f", buy?"BUY":"SELL", entryType, entryPrice));
-                               lastTradeBarTime = barTime; // <-- MAKE SURE THIS LINE IS PRESENT
+                Trade.Buy(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Buy%s", commentSuffix));
+                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
             }
             else
             {
-                SendTG(StringFormat("❌ Scalp %s %s failed: ret=%d", buy ? "BUY" : "SELL", entryType, Trade.ResultRetcode()));
+                Trade.Sell(lots, _Symbol, 0, finalSL, finalTP, StringFormat("V25 Scalp Sell%s", commentSuffix));
+                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
             }
-        } // <<< FIX: This closing brace was missing
+        }
+        else // "Limit"
+        {
+            ENUM_ORDER_TYPE_TIME time_type = Cancel_Pending_On_Flip ? ORDER_TIME_GTC : ORDER_TIME_SPECIFIED;
+            datetime expiration = Cancel_Pending_On_Flip ? 0 : TimeCurrent() + (Scalp_StopEntry_Expiry_Bars * PeriodSeconds(TF_Scalp));
+            if (buy)
+            {
+                Trade.BuyLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Buy Limit%s", commentSuffix));
+                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+            }
+            else
+            {
+                Trade.SellLimit(lots, entryPrice, _Symbol, finalSL, finalTP, time_type, expiration, StringFormat("V25 Scalp Sell Limit%s", commentSuffix));
+                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+            }
+        }
+
+        if (orderSent)
+        {
+            SendTG(StringFormat("✅ Scalp %s %s placed at %.5f", buy?"BUY":"SELL", entryType, entryPrice));
+            lastTradeBarTime = barTime;
+        }
+        else
+        {
+            SendTG(StringFormat("❌ Scalp %s %s failed: ret=%d", buy ? "BUY" : "SELL", entryType, Trade.ResultRetcode()));
+        }
     }
-    // ====================== END TryScalpEntries() FUNCTION ======================// ====================== END TryScalpEntries() FUNCTION ======================
+}
+
+
 // ====================== EA Entries ======================
 void TryEntries()
 {
-    
     // ====================== PER-BAR + COOLDOWN GUARDS ======================
-        // Keep THIS block (Lines ~602-605)
-        static datetime lastEvalBar = 0; // Declared ONCE here
-        datetime barTime = iTime(_Symbol, TF_Trade, 0); // Declared ONCE here
-        if(barTime == lastEvalBar) return;
-        lastEvalBar = barTime;
-        if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
-            return;
-        // ======================================================================
+    static datetime lastEvalBar = 0;
+    datetime barTime = iTime(_Symbol, TF_Trade, 0);
+    if(barTime == lastEvalBar) return;
+    lastEvalBar = barTime;
+    if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
+        return;
+    // ======================================================================
 
-        // --- NEW: TIME FILTER CHECK --- (Starts around line ~606)
-        if (!IsTradeTime())
-        {
-            return;
-        }
-        // --- END TIME FILTER ---
+    if (!IsTradeTime())
+    {
+        return;
+    }
+    
+    if(lastTradeBarTime == barTime) return;
 
-        // <<< Make sure the duplicate PER-BAR block from lines ~607-610 is DELETED >>>
-
-        // Cooldown after last trade bar (legacy guard) - This check might be redundant now, but keep it for safety.
-        if(lastTradeBarTime == barTime) return; // (Line ~611)
-
-        // --- NEW: Check Momentum Cooldown Status --- (Starts around line ~612)
-        bool isCooldownActive = false;
-    int  currentEntryMode = Entry_Mode; // Use the user's setting by default
+    // --- Check Momentum Cooldown Status ---
+    bool isCooldownActive = false;
+    int  currentEntryMode = Entry_Mode;
     if (g_momentumCooldownActive)
     {
         long barsPassed = (barTime - g_cooldownStartTime) / PeriodSeconds(TF_Trade);
         if (barsPassed >= Cooldown_Momentum_Bars)
         {
-            g_momentumCooldownActive = false; // Cooldown expired
+            g_momentumCooldownActive = false;
             SendTG("ℹ️ Cooldown over. Resuming normal entry mode.");
         }
         else
@@ -2084,27 +2044,22 @@ void TryEntries()
             currentEntryMode = 1; // Force Reversal (Divergence) mode
         }
     }
-    // --- End of New Block ---
     
-    // --- NEW: DYNAMIC SPREAD FILTER ---
-        if (Use_Dynamic_Spread_Filter && Avg_Spread_Lookback_Bars > 0 && Spread_Filter_Multiplier > 0)
+    // --- DYNAMIC SPREAD FILTER ---
+    if (Use_Dynamic_Spread_Filter && Avg_Spread_Lookback_Bars > 0 && Spread_Filter_Multiplier > 0)
+    {
+        double avgSpread = GetAverageSpreadBars(TF_Trade, Avg_Spread_Lookback_Bars);
+        if (avgSpread > 0)
         {
-            double avgSpread = GetAverageSpreadBars(TF_Trade, Avg_Spread_Lookback_Bars);
-            if (avgSpread > 0) // Only filter if average spread calculation is valid
+            double currentSpreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            if (currentSpreadPoints > (avgSpread * Spread_Filter_Multiplier))
             {
-                double currentSpreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD); // Explicitly cast integer to double
-                if (currentSpreadPoints > (avgSpread * Spread_Filter_Multiplier))
-                {
-                    // Optional: Print notification
-                    // PrintFormat("Main entry blocked by dynamic spread: %.1f points (Avg: %.1f, Max Allowed: %.1f)",
-                    //             currentSpreadPoints, avgSpread, avgSpread * Spread_Filter_Multiplier);
-                    return; // Spread is too wide, block main entry
-                }
+                return; // Spread is too wide
             }
         }
-        // --- END DYNAMIC SPREAD FILTER ---
+    }
 
-    // --- NEW: VOLATILITY ENTRY FILTER ---
+    // --- VOLATILITY ENTRY FILTER ---
     if(Use_Volatility_Entry_Filter)
     {
         double atr = 0;
@@ -2118,21 +2073,15 @@ void TryEntries()
         double lastCandleSize = iHigh(_Symbol, TF_Trade, 1) - iLow(_Symbol, TF_Trade, 1);
         if(atr > 0 && lastCandleSize > (atr * CircuitBreaker_ATR_Mult))
         {
-            return; // Block main entry, last candle was too volatile
+            return;
         }
     }
-    // --- END NEW FILTER ---
-
-    // --- Magic Number Logic (Initialize) ---
-    long magicToUse = Magic;         // Default to main trend magic
-    string commentSuffix = "";       // Default suffix
-    bool isMainReversalConditionMet = false; // Flag for special WPR condition allowing filter bypass
 
     // ================================ INDICATORS ==============================
     double stLineM15=0, stLineH1=0, stLineH4=0;
     int    dirM15=0, dirH1=0, dirH4=0;
     if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, stLineM15, dirM15)) return;
-    if(Use_H1H4_Filter) { // Only calculate if filter is active
+    if(Use_H1H4_Filter) {
         if(!CalcSuperTrend(PERIOD_H1, ST_ATR_Period, ST_ATR_Mult, 1, stLineH1, dirH1)) return;
         if(!CalcSuperTrend(PERIOD_H4, ST_ATR_Period, ST_ATR_Mult, 1, stLineH4, dirH4)) return;
     }
@@ -2141,161 +2090,154 @@ void TryEntries()
     double mom = MomentumValue(TF_Trade,1);
     double w  = WPRValue(TF_Trade,1);
     double c  = iClose(_Symbol, TF_Trade, 1);
-    bool hOK = (!Use_H1H4_Filter) || (dirH1==dirM15 && dirH4==dirM15); // H1/H4 alignment check
+    bool hOK = (!Use_H1H4_Filter) || (dirH1==dirM15 && dirH4==dirM15);
 
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-        bool buySignal = false;
-        bool sellSignal = false;
-        long magicToUse = Magic; // Default
-        string commentSuffix = ""; // Default
-        bool isMainReversalConditionMet = false; // Default
+    bool buySignal = false;
+    bool sellSignal = false;
+    long magicToUse = Magic;
+    string commentSuffix = "";
+    bool isMainReversalConditionMet = false;
 
-        // --- NEW: Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
-        if (currentEntryMode == 1 || currentEntryMode == 2) // Only check if reversals are allowed
+    // --- Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
+    if (currentEntryMode == 1 || currentEntryMode == 2)
+    {
+        double wprH4 = WPRValue(TF_HTF_Breakout, 1);
+        double wprH1 = WPRValue(TF_Trade, 1);
+        bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
+        bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
+        bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
+        bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
+
+        if (wprBuyTriggerOK && buyMomentumConfirmOK)
         {
-            // Condition 1: Primary WPR Trigger
-            double wprH4 = WPRValue(TF_HTF_Breakout, 1);
-            double wprH1 = WPRValue(TF_Trade, 1); // Uses 'w' calculated earlier
-            bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level); // Both Oversold
-            bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level); // Both Overbought
-
-            // Condition 2: Momentum Confirmation (Mandatory for Magic_Reversal)
-            bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength); // Exhaustion before Buy
-            bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength); // Exhaustion before Sell
-
-            // Check BUY Reversal based STRICTLY on WPR+Momentum
-            if (wprBuyTriggerOK && buyMomentumConfirmOK)
-            {
-                Print("TryEntries DEBUG: *** Magic_Reversal conditions MET for BUY (Strict WPR + Mom)! ***");
-                buySignal = true; // Set signal
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Main Reversal";
-                isMainReversalConditionMet = true; // Mark for filter bypass
-            }
-            // Check SELL Reversal based STRICTLY on WPR+Momentum
-            else if (wprSellTriggerOK && sellMomentumConfirmOK) // Use 'else if' to avoid setting both buy/sell signals
-            {
-                 Print("TryEntries DEBUG: *** Magic_Reversal conditions MET for SELL (Strict WPR + Mom)! ***");
-                sellSignal = true; // Set signal
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Main Reversal";
-                isMainReversalConditionMet = true; // Mark for filter bypass
-            }
-        } // End WPR+Momentum Reversal Check
-
-        // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
-        // Only check these if a Magic_Reversal signal wasn't already set
-        if (!buySignal && !sellSignal)
-        {
-            // Check Trend signals if allowed
-            if(currentEntryMode == 0 || currentEntryMode == 2)
-            {
-                if (dirM15 > 0 && c > stLineM15) buySignal = true;
-                if (dirM15 < 0 && c < stLineM15) sellSignal = true;
-            }
-
-            // Check standard AO Divergence signals if allowed AND no trend/reversal signal yet found
-            // NOTE: This check now respects Use_AO_Filter thanks to the modification in CheckDivergenceForEntry
-            if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
-            {
-                if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) {
-                     buySignal = true; // Standard divergence buy signal (uses default Magic)
-                     Print("TryEntries DEBUG: Standard AO Buy Divergence detected.");
-                } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) {
-                     sellSignal = true; // Standard divergence sell signal (uses default Magic)
-                     Print("TryEntries DEBUG: Standard AO Sell Divergence detected.");
-                }
-            }
-        } // End check for Trend/Standard Divergence
-
-        // --- If NO signal found by now, exit ---
-        if (!buySignal && !sellSignal) {
-            // Optional Print: Print("TryEntries DEBUG: No valid entry signal found this bar.");
-            // prevDir_ST update happens later before breakout check
-            return;
+            buySignal = true;
+            magicToUse = Magic_Reversal;
+            commentSuffix = " Main Reversal";
+            isMainReversalConditionMet = true;
         }
+        else if (wprSellTriggerOK && sellMomentumConfirmOK)
+        {
+            sellSignal = true;
+            magicToUse = Magic_Reversal;
+            commentSuffix = " Main Reversal";
+            isMainReversalConditionMet = true;
+        }
+    }
+
+    // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
+    if (!buySignal && !sellSignal)
+    {
+        if(currentEntryMode == 0 || currentEntryMode == 2)
+        {
+            if (dirM15 > 0 && c > stLineM15) buySignal = true;
+            if (dirM15 < 0 && c < stLineM15) sellSignal = true;
+        }
+        if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
+        {
+            if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) {
+                 buySignal = true;
+            } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) {
+                 sellSignal = true;
+            }
+        }
+    }
+
+    if (!buySignal && !sellSignal) {
+        return;
+    }
     
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
-    // --- Williams %R gating ---
     bool wBuyOK  = !Use_WPR_Bias || (w > -50.0);
     bool wSellOK = !Use_WPR_Bias || (w < -50.0);
     if(Use_OverboughtOversold_Filter) {
         if (w > WPR_Overbought_Level) wBuyOK = false;
         if (w < WPR_Oversold_Level) wSellOK = false;
     }
-    // --- AO & Momentum Confirmation ---
-    bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
-    bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength);
-    bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
-    bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
-
-    // --- Combine signals with confirmations ---
-    bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0); // True if filter off OR Alligator bullish
-    bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0); // True if filter off OR Alligator bearish
-    bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;       // True if filter off OR AO check passed
-    bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;      // True if filter off OR AO check passed
-
+    
     bool buyCond  = false;
     bool sellCond = false;
 
-    // --- Check if it's a special WPR Reversal ---
     if (isMainReversalConditionMet)
     {
-        // For a WPR+Momentum reversal, the signal IS the confirmation.
-        // We bypass the standard Alligator/AO/Momentum trend filters.
         if (buySignal) buyCond = true;
         if (sellSignal) sellCond = true;
-        Print("TryEntries DEBUG: Magic_Reversal signal detected, bypassing standard filters.");
     }
     else
     {
-        // Standard trend or AO Divergence signal, apply all filters
+        bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
+        bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength);
+        bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
+        bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
+        bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+        bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
+        bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
+        bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
+
         buyCond  = buySignal && alligatorBuyOK && finalAOBuyOK && wBuyOK && hOK && momBuyOK;
         sellCond = sellSignal && alligatorSellOK && finalAOSellOK && wSellOK && hOK && momSellOK;
     }
     
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
-        // --- Only apply standard filter if it's NOT our special Main Reversal ---
         if (!isMainReversalConditionMet) {
             bool finalFilterOK = false;
-            bool trendAlignOK = false; // Check H4 Trend Alignment
-            double htf_st_line_ignored; int htf_st_dir = 0;
-            if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, htf_st_line_ignored, htf_st_dir)) {
+            bool trendAlignOK = false;
+            int htf_st_dir = 0;
+            if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, stLineM15, htf_st_dir)) {
                 if(buyCond && htf_st_dir > 0) trendAlignOK = true;
                 if(sellCond && htf_st_dir < 0) trendAlignOK = true;
             }
-            bool breakoutOK = false; // Check H4 Breakout Alignment
+            bool breakoutOK = false;
             int bH_htf, bL_htf; double pH_htf, pL_htf;
             if(RecentSwings(TF_HTF_Breakout, HTF_Breakout_Lookback, bH_htf, pH_htf, bL_htf, pL_htf)) {
-                double atrHTF = 0.0; int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
+                double atrHTF = 0.0;
+                int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
                 if(hATR_htf != INVALID_HANDLE){ double ahtf[]; ArraySetAsSeries(ahtf,true); if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1]; IndicatorRelease(hATR_htf); }
-                if(atrHTF > 0.0){ double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1); double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
+                if(atrHTF > 0.0){ double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1);
+                                  double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
                                   if(buyCond && (cHTF >= (pH_htf + mHTF))) breakoutOK = true;
-                                  if(sellCond && (cHTF <= (pL_htf - mHTF))) breakoutOK = true; }
+                                  if(sellCond && (cHTF <= (pL_htf - mHTF))) breakoutOK = true;
+                }
             }
-            // Apply filter based on HTF_Filter_Mode
             switch(HTF_Filter_Mode) {
                 case 0: finalFilterOK = trendAlignOK; break;
                 case 1: finalFilterOK = breakoutOK; break;
-                case 2: finalFilterOK = trendAlignOK && breakoutOK; break; // Default AND
+                case 2: finalFilterOK = trendAlignOK && breakoutOK; break;
             }
-            if(!finalFilterOK) { buyCond = false; sellCond = false; } // Block if filter fails
-        } // End of conditional filter application
-    } else if (Directional_Filter_Mode == 1) { // Apply HTF Divergence Filter
+            if(!finalFilterOK) { buyCond = false; sellCond = false; }
+        }
+    } else if (Directional_Filter_Mode == 1) {
         int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
-        if (htfDivergenceBias > 0) sellCond = false; // Bearish HTF divergence blocks sells
-        if (htfDivergenceBias < 0) buyCond = false;  // Bullish HTF divergence blocks buys
+        if (htfDivergenceBias > 0) sellCond = false;
+        if (htfDivergenceBias < 0) buyCond = false;
     }
 
     // --- Final Check & Max Position Guard ---
     if (!buyCond && !sellCond) return;
+    
+    // ======================= STEP 3.5: BREAKOUT CONFIRMATION FILTER (CORRECTED) =======================
+    if (Use_Breakout_Confirmation && !isMainReversalConditionMet)
+    {
+        bool breakoutConfirmed = false;
+        if (buyCond)
+        {
+            breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade);
+        }
+        else if (sellCond)
+        {
+            breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade);
+        }
+
+        if (!breakoutConfirmed)
+        {
+            return; // BLOCK THE TRADE
+        }
+    }
+    // --- End of Breakout Filter ---
+
     if(One_Trade_At_A_Time && CountOpen()>0)
     {
-        string rejectMsg = StringFormat(
-                                        "🚫 TRADE REJECTED - Max Positions...\nTimeframe: %s\nSymbol: %s\nCurrent: %d\nMax: 1\nSignal: %s",
-                                         tfstr(TF_Trade), _Symbol, CountOpen(), buyCond ? "BUY" : (sellCond ? "SELL" : "N/A"));
-        SendTG(rejectMsg);
         return;
     }
 
@@ -2316,159 +2258,166 @@ void TryEntries()
             double entry = ask;
             if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(true, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
             else { sl = pL - ATR_SL_Buffer_Mult * atr; }
+            
             bool tpOk=false;
-            if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(true, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP; }
-            if(!tpOk) { double leg = MathAbs(pH - pL); tp = pH + 2.618 * leg; } // Fib fallback
+            if(Use_RR_Range) { double chosenR=0, dynTP=0;
+                tpOk = PickRRTarget(true, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP;
+            }
+            if(!tpOk) { double leg = MathAbs(pH - pL); tp = pH + 2.618 * leg; }
+            
             bool allowStage=false;
             if(!Use_ST_Flip_Retest){ allowStage=true; }
-            else { // Check Retest Logic
+            else {
+                bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength); // Re-check AO for retest
                 double tol = Retest_ATR_Tolerance * atr;
                 bool retestTouch = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tol);
                 bool confirmAway = (c >= stLineM15 + Confirm_Close_Dist_ATR * atr);
-                bool confirmOk = (ag>0 && aoBuyOK && wBuyOK && hOK && confirmAway);
+                bool confirmOk = (ag>0 && aoBuyOK && wBuyOK && hOK && confirmAway); // REMOVED flipWaitOK
                 if(stageCount==0) allowStage = (retestTouch && confirmOk);
-                else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(+1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(+1, e0, sl0, AddEntry_Trigger_Ratio); allowStage = (retestTouch && confirmOk && nearSL); }
+                else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(+1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(+1, e0, sl0, AddEntry_Trigger_Ratio);
+                    allowStage = (retestTouch && confirmOk && nearSL); }
             }
             if(!allowStage || stageCount>=Max_Entry_Stages) return;
+            
             if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMin(sl, stLineM15 - stPad); }
-            { double minPtsBuy = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point)); if( ((entry - sl)/_Point) < minPtsBuy ) return; }
+            { double minPtsBuy = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point));
+                if( ((entry - sl)/_Point) < minPtsBuy ) return; }
             { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_BUY, ssl, stp); sl=ssl; tp=stp; }
             if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp - (TP_Pullback_ATR_Mult * atr); }
             if((entry - sl) <= 0) return;
-            if (tp <= entry) { SendTG(StringFormat("🚫 BUY REJECTED...\nSymbol: %s\nReason: Invalid TP (%.2f) <= entry (%.2f).", _Symbol, tp, entry)); return; }
-            if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tolX); bool breakoutOK = (c >= (pH + Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
-            // --- Send Signal Alert ---
-                        SendTG(StringFormat("📈 BUY Setup %s %s\nST:%s Alligator:bull AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
-                                                     _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
+            if (tp <= entry) { return; }
+            if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr;
+                bool retraceOK = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tolX); bool breakoutOK = (c >= (pH + Breakout_ATR_Margin * atr));
+                if(!(retraceOK || breakoutOK)) return; }
 
-                        // --- Execute Trade ---
-                        if(Auto_Trade)
-                        {
-                            Trade.SetExpertMagicNumber(magicToUse);
-                            bool orderSent = false; // <<< FIX: Declared locally
-                            double msgEntryPrice = entry;
+            SendTG(StringFormat("📈 BUY Setup %s %s\nST:%s Alligator:bull AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
+                           _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
+            if(Auto_Trade)
+            {
+                Trade.SetExpertMagicNumber(magicToUse);
+                bool orderSent = false;
+                double msgEntryPrice = entry;
+                if(Use_Pending_Stop_Entries)
+                {
+                    if(CountPendingThisEA()>0) return;
+                    double hi1 = iHigh(_Symbol, TF_Trade, 1);
+                    double stopPrice = hi1 + StopEntry_Offset_ATR * atr;
+                    double riskPtsForLots = (stopPrice - sl) / _Point;
+                    double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots);
+                    msgEntryPrice = stopPrice;
+                    datetime expiration_buy = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+                    Trade.BuyStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_buy, StringFormat("V25 BuyStop%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                    
+                    string buySignalMsg = StringFormat("🟢 BUY SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
+                                                        _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
+                    SendTG(buySignalMsg);
+                }
+                else // Market Entry
+                {
+                    double orderLots = LotsByRisk(Risk_Percent, (entry - sl)/_Point);
+                    Trade.Buy(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                }
 
-                            if(Use_Pending_Stop_Entries)
-                            {
-                                if(CountPendingThisEA()>0) return; // Only one pending allowed
-                                double hi1 = iHigh(_Symbol, TF_Trade, 1);
-                                double stopPrice = hi1 + StopEntry_Offset_ATR * atr;
-                                double riskPtsForLots = (stopPrice - sl) / _Point;
-                                double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                                msgEntryPrice = stopPrice;
-                                datetime expiration_buy = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+                if(orderSent)
+                {
+                    SendTG(StringFormat("[📈 BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
+                    lastTradeBarTime = barTime;
+                    stageCount++;
+                    lastStageBar = barTime;
+                    if(Adjust_All_To_Latest) ApplySLTPToAllOpen(+1, sl, tp);
+                }
+                else
+                {
+                    SendTG(StringFormat("❌ BUY send failed: ret=%d", Trade.ResultRetcode()));
+                }
+            }
+        }
+        // =============================== SELL ===============================
+        else if(sellCond)
+        {
+            double entry = bid;
+            if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
+            else { sl = pH + ATR_SL_Buffer_Mult * atr; }
+            
+            bool tpOk=false;
+            if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP);
+                if(tpOk) tp = dynTP; }
+            if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; }
+            
+            bool allowStage=false;
+            if(!Use_ST_Flip_Retest){ allowStage=true; }
+            else {
+                bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength); // Re-check AO for retest
+                double tol = Retest_ATR_Tolerance * atr;
+                bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol);
+                bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr);
+                bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway); // REMOVED flipWaitOK
+                 if(stageCount==0) allowStage = (retestTouch && confirmOk);
+                 else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(-1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(-1, e0, sl0, AddEntry_Trigger_Ratio);
+                    allowStage = (retestTouch && confirmOk && nearSL); }
+            }
+            if(!allowStage || stageCount>=Max_Entry_Stages) return;
+            
+            if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMax(sl, stLineM15 + stPad); }
+            { double minPtsSell = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point));
+                if( ((sl - entry)/_Point) < minPtsSell ) return; }
+            { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
+            if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
+            if((sl - entry) <= 0) return;
+            if (tp >= entry) { return; }
+            if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr;
+                bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr));
+                if(!(retraceOK || breakoutOK)) return; }
 
-                                Trade.BuyStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_buy, StringFormat("V25 BuyStop%s", commentSuffix));
-                                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
+            SendTG(StringFormat("📉 SELL Setup %s %s\nST:%s Alligator:bear AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
+                           _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
+            if(Auto_Trade)
+            {
+                Trade.SetExpertMagicNumber(magicToUse);
+                bool orderSent = false;
+                double msgEntryPrice = entry;
+                if(Use_Pending_Stop_Entries) // Pending Sell Stop
+                {
+                    if(CountPendingThisEA()>0) return;
+                    double lo1 = iLow(_Symbol, TF_Trade, 1);
+                    double stopPrice = lo1 - StopEntry_Offset_ATR * atr;
+                    double riskPtsForLots = (sl - stopPrice) / _Point;
+                    double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots);
+                    msgEntryPrice = stopPrice;
+                    datetime expiration_sell = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
 
-                                // Send signal detected AFTER attempting trade
-                                string buySignalMsg = StringFormat("🟢 BUY SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
-                                                                   _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
-                                SendTG(buySignalMsg);
-                            }
-                            else // Market Entry
-                            {
-                                double orderLots = LotsByRisk(Risk_Percent, (entry - sl)/_Point);
-                                Trade.Buy(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
-                                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
-                            }
+                    Trade.SellStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_sell, StringFormat("V25 SellStop%s", commentSuffix));
+                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
 
-                            if(orderSent)
-                            {
-                                SendTG(StringFormat("[📈 BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
-                                lastTradeBarTime = barTime;
-                                stageCount++;
-                                lastStageBar = barTime;
-                                if(Adjust_All_To_Latest) ApplySLTPToAllOpen(+1, sl, tp);
-                            }
-                            else
-                            {
-                                SendTG(StringFormat("❌ BUY send failed: ret=%d", Trade.ResultRetcode()));
-                            }
-                        } // <<< FIX: Correct closing brace for if(Auto_Trade)
-                    } // End of if(buyCond)
-                    // =============================== SELL ===============================
-                    else if(sellCond)
-                    {
-                        double entry = bid;
-                        // --- SL Calculation ---
-                        if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
-                        else { sl = pH + ATR_SL_Buffer_Mult * atr; }
-                        // --- TP Calculation ---
-                        bool tpOk=false;
-                        if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP; }
-                        if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; }
-                        // --- Staging Logic ---
-                        bool allowStage=false;
-                        if(!Use_ST_Flip_Retest){ allowStage=true; }
-                        else { double tol = Retest_ATR_Tolerance * atr; bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol); bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr); bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway);
-                             if(stageCount==0) allowStage = (retestTouch && confirmOk);
-                             else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(-1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(-1, e0, sl0, AddEntry_Trigger_Ratio); allowStage = (retestTouch && confirmOk && nearSL); }
-                        }
-                        if(!allowStage || stageCount>=Max_Entry_Stages) return;
-                        // --- Final SL/TP Adjustments & Checks ---
-                        if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMax(sl, stLineM15 + stPad); }
-                        { double minPtsSell = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point)); if( ((sl - entry)/_Point) < minPtsSell ) return; }
-                        { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
-                        if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
-                        if((sl - entry) <= 0) return;
-                        if (tp >= entry) { SendTG(StringFormat("🚫 SELL REJECTED...\nSymbol: %s\nReason: Invalid TP (%.2f) >= entry (%.2f).", _Symbol, tp, entry)); return; }
-                        if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
+                    string sellSignalMsg = StringFormat("🔴 SELL SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
+                                                          _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
+                    SendTG(sellSignalMsg);
+                }
+                else // Market Sell
+                {
+                     double orderLots = LotsByRisk(Risk_Percent, (sl - entry)/_Point);
+                     Trade.Sell(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
+                     orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+                }
 
-                        // --- Send Signal Alert ---
-                        SendTG(StringFormat("📉 SELL Setup %s %s\nST:%s Alligator:bear AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
-                                                     _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
-
-                        // --- Execute Trade ---
-                        if(Auto_Trade)
-                        {
-                            Trade.SetExpertMagicNumber(magicToUse);
-                            bool orderSent = false; // <<< FIX: Declared locally
-                            double msgEntryPrice = entry;
-
-                            if(Use_Pending_Stop_Entries) // Pending Sell Stop
-                            {
-                                if(CountPendingThisEA()>0) return; // Only one pending allowed
-                                double lo1 = iLow(_Symbol, TF_Trade, 1);
-                                double stopPrice = lo1 - StopEntry_Offset_ATR * atr;
-                                double riskPtsForLots = (sl - stopPrice) / _Point;
-                                double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots); // <<< FIX: Correct variable name
-                                msgEntryPrice = stopPrice;
-                                datetime expiration_sell = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-
-                                Trade.SellStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_sell, StringFormat("V25 SellStop%s", commentSuffix));
-                                orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
-
-                                // Send signal detected AFTER attempting trade
-                                string sellSignalMsg = StringFormat("🔴 SELL SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
-                                                                    _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
-                                SendTG(sellSignalMsg);
-                            }
-                            else // Market Sell
-                            {
-                                 double orderLots = LotsByRisk(Risk_Percent, (sl - entry)/_Point); // <<< FIX: Correct variable name
-                                 Trade.Sell(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
-                                 orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE); // <<< FIX: Check result
-                            }
-
-                            if(orderSent)
-                            {
-                                SendTG(StringFormat("[📉 SELL placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp)); // <<< FIX: Added TP/SL/Entry
-                                lastTradeBarTime = barTime;
-                                stageCount++;
-                                lastStageBar = barTime;
-                                if(Adjust_All_To_Latest) ApplySLTPToAllOpen(-1, sl, tp);
-                            }
-                            else
-                            {
-                                SendTG(StringFormat("❌ SELL send failed: ret=%d", Trade.ResultRetcode()));
-                            }
-                        } // <<< FIX: Correct closing brace for if(Auto_Trade)
-                    } // End of else if(sellCond)
-                } // End of if(buyCond || sellCond)
-            } // End of TryEntries
-// Apply breakeven & trailing for open positions
-// UPGRADED ManageOpenPositions() FUNCTION WITH TIERED EXITS
+                if(orderSent)
+                {
+                     SendTG(StringFormat("[📉 SELL placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
+                    lastTradeBarTime = barTime;
+                    stageCount++;
+                    lastStageBar = barTime;
+                    if(Adjust_All_To_Latest) ApplySLTPToAllOpen(-1, sl, tp);
+                }
+                else
+                {
+                    SendTG(StringFormat("❌ SELL send failed: ret=%d", Trade.ResultRetcode()));
+                }
+            }
+        }
+    }
+}
 
 void ManageOpenPositions()
 
