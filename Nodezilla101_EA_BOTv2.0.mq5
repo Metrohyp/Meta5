@@ -23,6 +23,7 @@ input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place
 //---- Telegram
 input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
 input string          TG_CHAT_ID           = "394044850";
+input long            TG_THREAD_ID         = 0;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Main Strategy ---
@@ -69,11 +70,11 @@ input ENUM_TIMEFRAMES TF_Scalp_HTF_Divergence = PERIOD_H1; // HTF Divergence fil
 // --- General Entry Filters ---
 input bool           Use_OverboughtOversold_Filter = true; // Block entries in extreme WPR zones.
 input double         WPR_Overbought_Level          = -15;  // Level above which buys are blocked.
-input double         WPR_Oversold_Level            = -90;  // Level below which sells are blocked.
+input double         WPR_Oversold_Level            = -85;  // Level below which sells are blocked.
 
 // --- Proactive & Emergency Exits ---
 input bool           Use_Momentum_Exit_Filter = true; // If true, exits on signs of trend exhaustion (divergence).
-input int            Divergence_Lookback_Bars = 25;   // How many bars to check for divergence.
+input int            Divergence_Lookback_Bars = 5;   // How many bars to check for divergence.
 //================================================================================
 //                 --- TRADE MANAGEMENT & EXITS ---
 //================================================================================
@@ -274,21 +275,30 @@ string tfstr(ENUM_TIMEFRAMES tf)
 }
 
 // Drop-in replacement for your SendTG(...)
+// Drop-in replacement for your SendTG(...) - Now supports Topics/Threads
 bool SendTG(const string msg)
 {
     if(StringLen(TG_BOT_TOKEN)<10 || StringLen(TG_CHAT_ID)<1) return false;
-    
-    string url   = "https://api.telegram.org/bot"+(string)TG_BOT_TOKEN+"/sendMessage";
-    string body  = "chat_id="+(string)TG_CHAT_ID
-    + "&parse_mode=HTML&disable_web_page_preview=1&text="+URLEncode(msg);
-    
+
+    // Base URL
+    string url = "https://api.telegram.org/bot"+(string)TG_BOT_TOKEN+"/sendMessage";
+
+    // Base body parameters
+    string body = "chat_id="+(string)TG_CHAT_ID
+                + "&parse_mode=HTML&disable_web_page_preview=1"
+                + "&text="+URLEncode(msg);
+
+    // --- ADD THREAD ID if provided ---
+    if (TG_THREAD_ID != 0) {
+        body += "&message_thread_id=" + (string)TG_THREAD_ID;
+    }
+    // --- End addition ---
+
     char post[];
     StringToCharArray(body, post, 0, WHOLE_ARRAY, CP_UTF8);
-    
+
     char   result[];
     string resp_headers;
-    
-    // Correct MT5 signature: method, url, headers, timeout, data, result, resp_headers
     int res = WebRequest("POST",
                          url,
                          "Content-Type: application/x-www-form-urlencoded\r\n",
@@ -296,8 +306,10 @@ bool SendTG(const string msg)
                          post,
                          result,
                          resp_headers);
-    
-    if(res==-1){ Print("WebRequest error: ", GetLastError()); return false; }
+
+    if(res==-1){ Print("WebRequest error: ", GetLastError(), " | Response: ", CharArrayToString(result)); return false; } // Added response logging
+    // Optional: Print successful response for debugging
+    // else { Print("Telegram OK: ", CharArrayToString(result)); }
     return true;
 }
 
@@ -1743,101 +1755,110 @@ void TryScalpEntries()
     bool isTrendFlip = (mainSTDir != 0 && mainSTDir != prevDir_ST); // Use global prevDir_ST
 
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-    bool buySignal = false;
-    bool sellSignal = false;
+        bool buySignal = false;
+        bool sellSignal = false;
+        long magicToUse = Magic; // Default
+        string commentSuffix = ""; // Default
+        bool isScalpReversalConditionMet = false; // Default
 
-    // --- Priority 1: Check for Trend signals ---
-    if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following allowed
-    {
-        if (dirScalp > 0 && c > stLineScalp) buySignal = true;
-        if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
-    }
+        // --- NEW: Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
+        if (currentEntryMode == 1 || currentEntryMode == 2) // Only check if reversals are allowed
+        {
+            // Condition 1: Primary WPR Trigger
+            double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1);
+            double wprM15  = WPRValue(TF_Scalp, 1);
+            bool wprBuyTriggerOK  = (wprM15 < WPR_Oversold_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level); // M15 Extreme, H1 Normal
+            bool wprSellTriggerOK = (wprM15 > WPR_Overbought_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level); // M15 Extreme, H1 Normal
 
-    // --- Priority 2: Check for Reversal signals IF no trend signal was found OR if mode allows both ---
-            if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence) allowed
+            // Condition 2: Momentum Confirmation (Mandatory for Magic_Reversal)
+            bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+            bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+
+            // Check BUY Reversal based STRICTLY on WPR+Momentum
+            if (wprBuyTriggerOK && buyMomentumConfirmOK)
             {
-                bool foundBuyDivergence = CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp);
-                bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp);
+                Print("TryScalp DEBUG: *** Magic_Reversal conditions MET for BUY (Strict WPR + Mom)! ***");
+                buySignal = true; // Set signal
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Scalp Reversal";
+                isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
+                CloseOpenTrendPositions(POSITION_TYPE_BUY);
+            }
+            // Check SELL Reversal based STRICTLY on WPR+Momentum
+            else if (wprSellTriggerOK && sellMomentumConfirmOK) // Use 'else if'
+            {
+                 Print("TryScalp DEBUG: *** Magic_Reversal conditions MET for SELL (Strict WPR + Mom)! ***");
+                sellSignal = true; // Set signal
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Scalp Reversal";
+                isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
+                CloseOpenTrendPositions(POSITION_TYPE_SELL);
+            }
+        } // End WPR+Momentum Reversal Check
 
-                // --- Primary Trigger: Check WPR conditions for SPECIAL handling ---
-                double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1); // Get H1 WPR (Scalp's HTF)
-                double wprM15  = WPRValue(TF_Scalp, 1);         // Get M15 WPR (Scalp's own TF)
-                bool m15Overbought = (wprM15 > WPR_Overbought_Level);
-                bool m15Oversold   = (wprM15 < WPR_Oversold_Level);
-                bool h1Normal      = (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
+        // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
+        if (!buySignal && !sellSignal)
+        {
+            // Check Trend signals if allowed
+            if(currentEntryMode == 0 || currentEntryMode == 2)
+            {
+                if (dirScalp > 0 && c > stLineScalp) buySignal = true;
+                if (dirScalp < 0 && c < stLineScalp) sellSignal = true;
+            }
 
-                // --- Secondary Confirmation (Optional): Check Momentum ---
-                bool buyReversalMomentumOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
-                bool sellReversalMomentumOK = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
-
-                // Evaluate BUY Reversal
-                if (foundBuyDivergence && !buySignal)
-                {
-                     // <<<--- ADD DEBUG PRINT HERE ---<<<
-                    PrintFormat("TryScalp DEBUG: Found BUY divergence. Checking Reversal Conditions...");
-                    PrintFormat("TryScalp DEBUG: WPR M15=%.1f, H1=%.1f. M15Oversold=%s, H1Normal=%s", wprM15, wprH1, m15Oversold, h1Normal);
-                    PrintFormat("TryScalp DEBUG: Momentum=%.2f. UseFilter=%s. BuyMomOK=%s", mom, Use_Momentum_Filter, buyReversalMomentumOK);
-                    // --- END DEBUG PRINT ---
-
-                    buySignal = true; // Divergence buy signal exists
-                    // Check Primary WPR Trigger AND Optional Momentum Confirmation
-                    if (m15Oversold && h1Normal && buyReversalMomentumOK) // <<<--- REVISED CONDITION
-                    {
-                        // <<<--- ADD DEBUG PRINT HERE ---<<<
-                        Print("TryScalp DEBUG: *** Magic_Reversal conditions MET for BUY! ***");
-                        // --- END DEBUG PRINT ---
-                        magicToUse = Magic_Reversal;
-                        commentSuffix = " Scalp Reversal";
-                        isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
-                        CloseOpenTrendPositions(POSITION_TYPE_BUY);
-                    }
-                    else if (currentEntryMode == 1) { /* standard reversal handling */ }
+            // Check standard AO Divergence signals if allowed AND no trend/reversal signal yet found
+            // NOTE: This respects Use_AO_Filter
+            if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
+            {
+                if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp)) {
+                     buySignal = true; // Standard divergence buy signal (uses default Magic)
+                     Print("TryScalp DEBUG: Standard AO Buy Divergence detected.");
+                } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp)) {
+                     sellSignal = true; // Standard divergence sell signal (uses default Magic)
+                     Print("TryScalp DEBUG: Standard AO Sell Divergence detected.");
                 }
+            }
+        } // End check for Trend/Standard Divergence
 
-                // Evaluate SELL Reversal
-                if (foundSellDivergence && !sellSignal)
-                {
-                     // <<<--- ADD DEBUG PRINT HERE ---<<<
-                    PrintFormat("TryScalp DEBUG: Found SELL divergence. Checking Reversal Conditions...");
-                    PrintFormat("TryScalp DEBUG: WPR M15=%.1f, H1=%.1f. M15Overbought=%s, H1Normal=%s", wprM15, wprH1, m15Overbought, h1Normal);
-                    PrintFormat("TryScalp DEBUG: Momentum=%.2f. UseFilter=%s. SellMomOK=%s", mom, Use_Momentum_Filter, sellReversalMomentumOK);
-                    // --- END DEBUG PRINT ---
+         // --- If NO signal found by now, exit ---
+        if (!buySignal && !sellSignal) {
+            // Optional Print: Print("TryScalp DEBUG: No valid entry signal found this bar.");
+            return;
+        }
 
-                    sellSignal = true; // Divergence sell signal exists
-                    // Check Primary WPR Trigger AND Optional Momentum Confirmation
-                    if (m15Overbought && h1Normal && sellReversalMomentumOK) // <<<--- REVISED CONDITION
-                    {
-                         // <<<--- ADD DEBUG PRINT HERE ---<<<
-                        Print("TryScalp DEBUG: *** Magic_Reversal conditions MET for SELL! ***");
-                        // --- END DEBUG PRINT ---
-                        magicToUse = Magic_Reversal;
-                        commentSuffix = " Scalp Reversal";
-                        isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
-                        CloseOpenTrendPositions(POSITION_TYPE_SELL);
-                    }
-                     else if (currentEntryMode == 1) { /* standard reversal handling */ }
-                }
-            } // End Reversal Check
-    
-    // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
-    bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-    bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-    bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
-    bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
-    bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
-    bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
-    bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
-    bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
-    bool buyCond  = buySignal && (ag > 0 && aoBuyOK && momBuyOK);
-    bool sellCond = sellSignal && (ag < 0 && aoSellOK && momSellOK);
+    // ======================= STEP 2: APPLY CONFIRMATION FILTERS (FIXED) =======================
+    bool buyCond  = false;
+    bool sellCond = false;
 
-    // --- Breakout Confirmation (applied only to trend signals after a flip) ---
-    // Note: Uses isTrendFlip determined from the main TF context (global prevDir_ST)
-    if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed) {
-        if (buyCond && magicToUse == Magic) { if(!IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Scalp)) buyCond = false; else g_breakoutConfirmed = true; }
-        if (sellCond && magicToUse == Magic) { if(!IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Scalp)) sellCond = false; else g_breakoutConfirmed = true; }
+    // --- Check if it's a special WPR Reversal ---
+    if (isScalpReversalConditionMet)
+    {
+        // For a WPR+Momentum reversal, the signal IS the confirmation.
+        // We bypass the standard Alligator/AO/Momentum trend filters.
+        if (buySignal) buyCond = true;
+        if (sellSignal) sellCond = true;
+        Print("TryScalp DEBUG: Magic_Reversal signal detected, bypassing standard filters.");
     }
+    else
+    {
+        // --- Standard Trend or AO Divergence signal, apply all filters ---
+        bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
+        bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
+        bool momBuyOK  = !Use_Momentum_Filter ||
+                         (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+        bool momSellOK = !Use_Momentum_Filter ||
+                         (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+        bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+        bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
+        bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
+        bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
 
+        // Combine filters for standard signals
+        // Note: We use 'buySignal' and 'sellSignal' from Step 1
+        if (buySignal && alligatorBuyOK && finalAOBuyOK && momBuyOK) buyCond = true;
+        if (sellSignal && alligatorSellOK && finalAOSellOK && momSellOK) sellCond = true;
+    }
+    
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
         // --- Only apply standard filter if it's NOT our special Scalp Reversal ---
@@ -2123,78 +2144,76 @@ void TryEntries()
     bool hOK = (!Use_H1H4_Filter) || (dirH1==dirM15 && dirH4==dirM15); // H1/H4 alignment check
 
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-    bool buySignal = false;
-    bool sellSignal = false;
+        bool buySignal = false;
+        bool sellSignal = false;
+        long magicToUse = Magic; // Default
+        string commentSuffix = ""; // Default
+        bool isMainReversalConditionMet = false; // Default
 
-    // --- Priority 1: Check for Trend signals ---
-    if(currentEntryMode == 0 || currentEntryMode == 2) // Trend-Following allowed
-    {
-        if (dirM15 > 0 && c > stLineM15) buySignal = true; // Basic ST Buy signal
-        if (dirM15 < 0 && c < stLineM15) sellSignal = true; // Basic ST Sell signal
-    }
+        // --- NEW: Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
+        if (currentEntryMode == 1 || currentEntryMode == 2) // Only check if reversals are allowed
+        {
+            // Condition 1: Primary WPR Trigger
+            double wprH4 = WPRValue(TF_HTF_Breakout, 1);
+            double wprH1 = WPRValue(TF_Trade, 1); // Uses 'w' calculated earlier
+            bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level); // Both Oversold
+            bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level); // Both Overbought
 
-    // --- Priority 2: Check for Reversal signals IF no trend signal was found OR if mode allows both ---
-            if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence) allowed
+            // Condition 2: Momentum Confirmation (Mandatory for Magic_Reversal)
+            bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength); // Exhaustion before Buy
+            bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength); // Exhaustion before Sell
+
+            // Check BUY Reversal based STRICTLY on WPR+Momentum
+            if (wprBuyTriggerOK && buyMomentumConfirmOK)
             {
-                bool foundBuyDivergence = CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade);
-                bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade);
+                Print("TryEntries DEBUG: *** Magic_Reversal conditions MET for BUY (Strict WPR + Mom)! ***");
+                buySignal = true; // Set signal
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Main Reversal";
+                isMainReversalConditionMet = true; // Mark for filter bypass
+            }
+            // Check SELL Reversal based STRICTLY on WPR+Momentum
+            else if (wprSellTriggerOK && sellMomentumConfirmOK) // Use 'else if' to avoid setting both buy/sell signals
+            {
+                 Print("TryEntries DEBUG: *** Magic_Reversal conditions MET for SELL (Strict WPR + Mom)! ***");
+                sellSignal = true; // Set signal
+                magicToUse = Magic_Reversal;
+                commentSuffix = " Main Reversal";
+                isMainReversalConditionMet = true; // Mark for filter bypass
+            }
+        } // End WPR+Momentum Reversal Check
 
-                // --- Primary Trigger: Check WPR conditions for SPECIAL handling ---
-                double wprH4 = WPRValue(TF_HTF_Breakout, 1); // Get H4 WPR
-                double wprH1 = WPRValue(TF_Trade, 1);       // Get H1 WPR (w)
-                bool bothOverbought = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
-                bool bothOversold   = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
+        // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
+        // Only check these if a Magic_Reversal signal wasn't already set
+        if (!buySignal && !sellSignal)
+        {
+            // Check Trend signals if allowed
+            if(currentEntryMode == 0 || currentEntryMode == 2)
+            {
+                if (dirM15 > 0 && c > stLineM15) buySignal = true;
+                if (dirM15 < 0 && c < stLineM15) sellSignal = true;
+            }
 
-                // --- Secondary Confirmation (Optional): Check Momentum ---
-                bool buyReversalMomentumOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
-                bool sellReversalMomentumOK = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
-
-                // Evaluate BUY Reversal
-                if (foundBuyDivergence && !buySignal)
-                {
-                    // <<<--- ADD DEBUG PRINT HERE ---<<<
-                    PrintFormat("TryEntries DEBUG: Found BUY divergence. Checking Reversal Conditions...");
-                    PrintFormat("TryEntries DEBUG: WPR H1=%.1f, H4=%.1f. BothOversold=%s", wprH1, wprH4, bothOversold);
-                    PrintFormat("TryEntries DEBUG: Momentum=%.2f. UseFilter=%s. BuyMomOK=%s", mom, Use_Momentum_Filter, buyReversalMomentumOK);
-                    // --- END DEBUG PRINT ---
-
-                    buySignal = true; // A divergence buy signal exists
-                    // Check Primary WPR Trigger AND Optional Momentum Confirmation
-                    if (bothOversold && buyReversalMomentumOK) // <<<--- REVISED CONDITION
-                    {
-                        // <<<--- ADD DEBUG PRINT HERE ---<<<
-                        Print("TryEntries DEBUG: *** Magic_Reversal conditions MET for BUY! ***");
-                        // --- END DEBUG PRINT ---
-                        magicToUse = Magic_Reversal;
-                        commentSuffix = " Main Reversal";
-                        isMainReversalConditionMet = true; // Mark for filter bypass
-                    }
-                    else if (currentEntryMode == 1) { /* standard reversal handling */ }
+            // Check standard AO Divergence signals if allowed AND no trend/reversal signal yet found
+            // NOTE: This check now respects Use_AO_Filter thanks to the modification in CheckDivergenceForEntry
+            if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
+            {
+                if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) {
+                     buySignal = true; // Standard divergence buy signal (uses default Magic)
+                     Print("TryEntries DEBUG: Standard AO Buy Divergence detected.");
+                } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) {
+                     sellSignal = true; // Standard divergence sell signal (uses default Magic)
+                     Print("TryEntries DEBUG: Standard AO Sell Divergence detected.");
                 }
+            }
+        } // End check for Trend/Standard Divergence
 
-                // Evaluate SELL Reversal
-                if (foundSellDivergence && !sellSignal)
-                {
-                     // <<<--- ADD DEBUG PRINT HERE ---<<<
-                    PrintFormat("TryEntries DEBUG: Found SELL divergence. Checking Reversal Conditions...");
-                    PrintFormat("TryEntries DEBUG: WPR H1=%.1f, H4=%.1f. BothOverbought=%s", wprH1, wprH4, bothOverbought);
-                    PrintFormat("TryEntries DEBUG: Momentum=%.2f. UseFilter=%s. SellMomOK=%s", mom, Use_Momentum_Filter, sellReversalMomentumOK);
-                    // --- END DEBUG PRINT ---
-
-                    sellSignal = true; // A divergence sell signal exists
-                    // Check Primary WPR Trigger AND Optional Momentum Confirmation
-                    if (bothOverbought && sellReversalMomentumOK) // <<<--- REVISED CONDITION
-                    {
-                        // <<<--- ADD DEBUG PRINT HERE ---<<<
-                        Print("TryEntries DEBUG: *** Magic_Reversal conditions MET for SELL! ***");
-                        // --- END DEBUG PRINT ---
-                        magicToUse = Magic_Reversal;
-                        commentSuffix = " Main Reversal";
-                        isMainReversalConditionMet = true; // Mark for filter bypass
-                    }
-                     else if (currentEntryMode == 1) { /* standard reversal handling */ }
-                }
-            } // End Reversal Check
+        // --- If NO signal found by now, exit ---
+        if (!buySignal && !sellSignal) {
+            // Optional Print: Print("TryEntries DEBUG: No valid entry signal found this bar.");
+            // prevDir_ST update happens later before breakout check
+            return;
+        }
     
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     // --- Williams %R gating ---
@@ -2215,33 +2234,26 @@ void TryEntries()
     bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0); // True if filter off OR Alligator bearish
     bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;       // True if filter off OR AO check passed
     bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;      // True if filter off OR AO check passed
-    bool buyCond  = buySignal && (ag > 0 && aoBuyOK && wBuyOK && hOK && momBuyOK);
-    bool sellCond = sellSignal && (ag < 0 && aoSellOK && wSellOK && hOK && momSellOK);
 
-    // --- Trend Flip & Breakout Confirmation Logic ---
-    if(dirM15 != 0 && dirM15 != prevDir_ST && prevDir_ST != 0) { // Trend Flip Detection
-        flipBar = iTime(_Symbol, TF_Trade, 1);
-        stageCount = 0;
-        g_breakoutConfirmed = false;
-        string newTrend = (dirM15 > 0) ? "UP (Bullish)" : "DOWN (Bearish)";
-        string alertMsg = StringFormat("🔄 TREND FLIP DETECTED...\nSymbol: %s\nTimeframe: %s\nNew Trend: %s",
-                                       _Symbol, tfstr(TF_Trade), newTrend);
-        SendTG(alertMsg);
-    }
-    prevDir_ST = dirM15;
-    bool isTrendFlip = (dirM15 != 0 && dirM15 != prevDir_ST); // Recheck after update
-    bool flipWaitOK = true;
-    if(isTrendFlip && Min_Bars_After_Flip > 0) {
-        datetime barsSinceFlip = (barTime - flipBar) / PeriodSeconds(TF_Trade);
-        flipWaitOK = (barsSinceFlip >= Min_Bars_After_Flip);
-    }
-    if(!flipWaitOK) { buyCond = false; sellCond = false; }
+    bool buyCond  = false;
+    bool sellCond = false;
 
-    if(Use_Breakout_Confirmation && isTrendFlip && !g_breakoutConfirmed) {
-        if (buyCond && magicToUse == Magic) { if(!IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade)) buyCond = false; else g_breakoutConfirmed = true; }
-        if (sellCond && magicToUse == Magic) { if(!IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade)) sellCond = false; else g_breakoutConfirmed = true; }
+    // --- Check if it's a special WPR Reversal ---
+    if (isMainReversalConditionMet)
+    {
+        // For a WPR+Momentum reversal, the signal IS the confirmation.
+        // We bypass the standard Alligator/AO/Momentum trend filters.
+        if (buySignal) buyCond = true;
+        if (sellSignal) sellCond = true;
+        Print("TryEntries DEBUG: Magic_Reversal signal detected, bypassing standard filters.");
     }
-
+    else
+    {
+        // Standard trend or AO Divergence signal, apply all filters
+        buyCond  = buySignal && alligatorBuyOK && finalAOBuyOK && wBuyOK && hOK && momBuyOK;
+        sellCond = sellSignal && alligatorSellOK && finalAOSellOK && wSellOK && hOK && momSellOK;
+    }
+    
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
         // --- Only apply standard filter if it's NOT our special Main Reversal ---
@@ -2313,7 +2325,7 @@ void TryEntries()
                 double tol = Retest_ATR_Tolerance * atr;
                 bool retestTouch = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tol);
                 bool confirmAway = (c >= stLineM15 + Confirm_Close_Dist_ATR * atr);
-                bool confirmOk = (ag>0 && aoBuyOK && wBuyOK && hOK && confirmAway && flipWaitOK);
+                bool confirmOk = (ag>0 && aoBuyOK && wBuyOK && hOK && confirmAway);
                 if(stageCount==0) allowStage = (retestTouch && confirmOk);
                 else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(+1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(+1, e0, sl0, AddEntry_Trigger_Ratio); allowStage = (retestTouch && confirmOk && nearSL); }
             }
@@ -2389,7 +2401,7 @@ void TryEntries()
                         // --- Staging Logic ---
                         bool allowStage=false;
                         if(!Use_ST_Flip_Retest){ allowStage=true; }
-                        else { double tol = Retest_ATR_Tolerance * atr; bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol); bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr); bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway && flipWaitOK);
+                        else { double tol = Retest_ATR_Tolerance * atr; bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol); bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr); bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway);
                              if(stageCount==0) allowStage = (retestTouch && confirmOk);
                              else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(-1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(-1, e0, sl0, AddEntry_Trigger_Ratio); allowStage = (retestTouch && confirmOk && nearSL); }
                         }
