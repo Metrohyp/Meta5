@@ -26,6 +26,10 @@ input string          TG_CHAT_ID           = "394044850";
 input long            TG_THREAD_ID         = 0;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
+// --- Master Strategy Selection ---
+input int            Entry_Mode = 2; // 0=Trend-Following, 1=Reversal (Divergence), 2=BOTH
+input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF Divergence
+
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
 input double         Risk_Percent     = 2;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
@@ -58,10 +62,6 @@ input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit
 
 // HTF divergence filter inputs (add with other 'input' lines)
 input bool    Use_HTF_Filter            = true;                    // enable HTF divergence filter
-
-// --- Master Strategy Selection ---
-input int            Entry_Mode = 2; // 0=Trend-Following, 1=Reversal (Divergence), 2=BOTH
-input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF Divergence
 
 // --- Settings for HTF Divergence Filter (Directional Mode 1) ---
 input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H4;    // Timeframe to check for directional divergence.
@@ -124,12 +124,12 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
+input int            Max_Entry_Stages   = 20;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
-input int            Scalp_Max_Concurrent = 5;      // Max number of simultaneous scalp trades.
+input int            Scalp_Max_Concurrent = 10;      // Max number of simultaneous scalp trades.
 
 // --- NEW: DYNAMIC SPREAD FILTER ---
 input bool           Use_Dynamic_Spread_Filter = false;  // Enable/disable the dynamic spread filter.
@@ -152,6 +152,15 @@ input int            Trade_End_Min     = 0;      // End minute (e.g., 0)
 input bool Use_Alligator_Filter = true; // Use Alligator state for confirmation
 input bool Use_AO_Filter = false;        // Use Awesome Oscillator strength for confirmation
 input bool           Use_Momentum_Filter = true;   // true = require Momentum confirmation
+
+// --- NEW: Stochastic Filter ---
+input bool Use_Stochastic_Filter = true;        // Use Stochastic Oscillator 20/80 cross for confirmation
+input int  Stoch_K_Period        = 14;        // %K Length
+input int  Stoch_D_Period        = 3;         // %D Smoothing
+input int  Stoch_Slowing         = 1;         // %K Smoothing
+input ENUM_MA_METHOD Stoch_MA_Method = MODE_SMA;   // Smoothing method (usually SMA)
+input ENUM_STO_PRICE Stoch_Price_Field = STO_LOWHIGH; // Price field (usually Low/High)
+// --- End NEW ---
 
 // --- Indicator Settings ---
 input int            ST_ATR_Period    = 10;
@@ -333,6 +342,58 @@ string URLEncode(const string s)
     return out;
 }
 //======================== Indicator Helpers =========================
+
+// --- NEW: Stochastic Oscillator Helper ---
+// Returns true if successful, provides %K (main) and %D (signal) values
+bool StochasticValues(ENUM_TIMEFRAMES tf, int shift, double &k_val, double &d_val)
+{
+    k_val = EMPTY_VALUE;
+    d_val = EMPTY_VALUE;
+    // Get handle for Stochastic indicator using input parameters
+    int handle = iStochastic(_Symbol, tf, Stoch_K_Period, Stoch_D_Period, Stoch_Slowing, Stoch_MA_Method, Stoch_Price_Field);
+    if(handle == INVALID_HANDLE)
+    {
+        Print("StochasticValues: Failed to get indicator handle. Error ", GetLastError());
+        return false;
+    }
+
+    double k_buff[], d_buff[];
+    // Set arrays to read data chronologically (oldest first)
+    ArraySetAsSeries(k_buff, true);
+    ArraySetAsSeries(d_buff, true);
+
+    bool ok = true;
+    // Copy data for the required shift + one bar before it (to check the cross)
+    // Need shift+2 bars to get data for index [shift] and [shift+1] if series=true
+    if(CopyBuffer(handle, 0, 0, shift + 2, k_buff) <= shift + 1)
+    {
+        Print("StochasticValues: Failed to copy %K buffer. Error ", GetLastError());
+        ok = false; // Main line (%K) is buffer 0
+    }
+    if(CopyBuffer(handle, 1, 0, shift + 2, d_buff) <= shift + 1)
+    {
+        Print("StochasticValues: Failed to copy %D buffer. Error ", GetLastError());
+        ok = false; // Signal line (%D) is buffer 1
+    }
+
+    IndicatorRelease(handle); // Release the handle
+
+    if(!ok) return false; // Return false if data copy failed
+
+    // Assign the values for the requested shift
+    k_val = k_buff[shift];
+    d_val = d_buff[shift];
+
+    // Check if the values are valid numbers
+    if(!MathIsValidNumber(k_val) || !MathIsValidNumber(d_val))
+    {
+       // Print("StochasticValues: Indicator returned invalid number at shift ", shift);
+        return false;
+    }
+
+    return true; // Success
+}
+// --- End NEW ---
 
 // --- NEW HELPER: Calculates average spread over recent bars ---
 double GetAverageSpreadBars(ENUM_TIMEFRAMES tf, int lookbackBars)
@@ -1800,20 +1861,33 @@ void TryScalpEntries()
         if (buySignal) buyCond = true;
         if (sellSignal) sellCond = true;
     }
-    else
-    {
-        bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-        bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
-        bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
-        bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
-        bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
-        bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
-        bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
-        bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
+    else // This is for Standard Trend signals (NOT Reversals)
+        {
+            // --- Calculate Stochastic for the last 2 closed bars ---
+            double stoch_k1=EMPTY_VALUE, stoch_d1=EMPTY_VALUE; // Bar at shift 1 (most recent closed)
+            double stoch_k2=EMPTY_VALUE, stoch_d2=EMPTY_VALUE; // Bar at shift 2 (previous closed)
+            bool stochOK1 = StochasticValues(TF_Scalp, 1, stoch_k1, stoch_d1);
+            bool stochOK2 = StochasticValues(TF_Scalp, 2, stoch_k2, stoch_d2);
 
-        if (buySignal && alligatorBuyOK && finalAOBuyOK && momBuyOK) buyCond = true;
-        if (sellSignal && alligatorSellOK && finalAOSellOK && momSellOK) sellCond = true;
-    }
+            // --- Stochastic Confirmation (Using 20/80 Level Cross) ---
+            // For BUY: Check if %K crossed ABOVE 20 on the last closed bar
+            bool stochBuyOK  = !Use_Stochastic_Filter ||
+                               (stochOK1 && stochOK2 && stoch_k1 > 20.0 && stoch_k2 <= 20.0);
+
+            // For SELL: Check if %K crossed BELOW 80 on the last closed bar
+            bool stochSellOK = !Use_Stochastic_Filter ||
+                               (stochOK1 && stochOK2 && stoch_k1 < 80.0 && stoch_k2 >= 80.0);
+
+            // --- Other Filters ---
+            bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+            bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+            bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+            bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
+
+            // --- Combine Filters ---
+            if (buySignal && alligatorBuyOK && stochBuyOK && momBuyOK) buyCond = true;
+            if (sellSignal && alligatorSellOK && stochSellOK && momSellOK) sellCond = true;
+        }
     
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
@@ -2163,21 +2237,34 @@ void TryEntries()
         if (buySignal) buyCond = true;
         if (sellSignal) sellCond = true;
     }
-    else
-    {
-        bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength);
-        bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength);
-        bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
-        bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
-        bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
-        bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
-        bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
-        bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
+    else // This is for Standard Trend signals (NOT Reversals)
+        {
+            // --- Calculate Stochastic for the last 2 closed bars ---
+            double stoch_k1=EMPTY_VALUE, stoch_d1=EMPTY_VALUE; // Bar at shift 1 (most recent closed)
+            double stoch_k2=EMPTY_VALUE, stoch_d2=EMPTY_VALUE; // Bar at shift 2 (previous closed)
+            bool stochOK1 = StochasticValues(TF_Trade, 1, stoch_k1, stoch_d1);
+            bool stochOK2 = StochasticValues(TF_Trade, 2, stoch_k2, stoch_d2);
 
-        buyCond  = buySignal && alligatorBuyOK && finalAOBuyOK && wBuyOK && hOK && momBuyOK;
-        sellCond = sellSignal && alligatorSellOK && finalAOSellOK && wSellOK && hOK && momSellOK;
-    }
-    
+            // --- Stochastic Confirmation (Using 20/80 Level Cross) ---
+            // For BUY: Check if %K crossed ABOVE 20 on the last closed bar
+            bool stochBuyOK  = !Use_Stochastic_Filter ||
+                               (stochOK1 && stochOK2 && stoch_k1 > 20.0 && stoch_k2 <= 20.0);
+
+            // For SELL: Check if %K crossed BELOW 80 on the last closed bar
+            bool stochSellOK = !Use_Stochastic_Filter ||
+                               (stochOK1 && stochOK2 && stoch_k1 < 80.0 && stoch_k2 >= 80.0);
+
+            // --- Other Filters ---
+            bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
+            bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
+            bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+            bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
+            // wBuyOK/wSellOK and hOK are checked later/separately
+
+            // --- Combine Filters ---
+            if (buySignal && alligatorBuyOK && stochBuyOK && momBuyOK) buyCond = true;
+            if (sellSignal && alligatorSellOK && stochSellOK && momSellOK) sellCond = true;
+        }
     // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
     if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
         if (!isMainReversalConditionMet) {
