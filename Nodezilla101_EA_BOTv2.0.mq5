@@ -27,7 +27,7 @@ input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
-input double         Risk_Percent     = 1;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Risk_Percent     = 2;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
@@ -35,7 +35,7 @@ input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 1;      // if >0, overrides and uses this absolute % just for scalps
+input double         Risk_Percent_Scalp = 2;      // if >0, overrides and uses this absolute % just for scalps
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
@@ -122,7 +122,7 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
-input bool           Use_ST_Flip_Retest = true;      // Wait for price to pull back to the ST line before entry.
+input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
 input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
@@ -147,10 +147,14 @@ input int            Trade_End_Min     = 0;      // End minute (e.g., 0)
 //                --- ADVANCED & SYSTEM SETTINGS ---
 //================================================================================
 // Fine-tuning parameters. Adjust with caution.
+// --- Indicator Confirmation Toggles ---
+input bool Use_Alligator_Filter = true; // Use Alligator state for confirmation
+input bool Use_AO_Filter = false;        // Use Awesome Oscillator strength for confirmation
+input bool           Use_Momentum_Filter = true;   // true = require Momentum confirmation
 
 // --- Indicator Settings ---
 input int            ST_ATR_Period    = 10;
-input double         ST_ATR_Mult      = 3.0;
+input double         ST_ATR_Mult      = 1.5;
 input int            Jaw_Period       = 13;
 input int            Jaw_Shift        = 8;
 input int            Teeth_Period     = 8;
@@ -159,11 +163,10 @@ input int            Lips_Period      = 5;
 input int            Lips_Shift       = 3;
 input double         AO_Min_Strength  = 3.0;
 input double         AO_Scalp_Min_Strength = 3;
-// --- NEW: Momentum Indicator Filter Settings ---
-input bool           Use_Momentum_Filter = true;   // true = require Momentum confirmation
 input int            Momentum_Period     = 14;   // Period for the Momentum indicator
 input double         Mom_Min_Strength    = 0.5;  // Required strength (distance from 100)
 input double         Mom_Scalp_Min_Strength = 0.3; // Required strength for scalps
+
 input bool           Use_WPR_Bias     = true;
 input bool           Use_WPR_Cross    = false;
 
@@ -191,7 +194,7 @@ input bool           Scalp_Use_RR_Range = true;
 input bool           Use_Dynamic_SL_ATR = true;
 input double         ATR_SL_Buffer_Mult = 0.1;
 input double         SL_ATR_Min         = 1.5;
-input double         SL_ATR_Max         = 6.0;
+input double         SL_ATR_Max         = 4.0;
 input double         SL_Swing_Pad_ATR   = 0.60;
 input double         Min_SL_ATR_Mult    = 0.75;
 input int            Min_SL_Points      = 0;
@@ -202,7 +205,7 @@ input double         TP_Swing_Ext_ATR_Mult = 1.50;
 input double         Scalp_TP_Max_ATR_Mult = 6.0;
 input double         Scalp_TP_Swing_Ext_ATR_Mult = 1.50;
 input int            Scalp_ATR_Period   = 10;
-input double         Scalp_SL_ATR_Mult  = 1;
+input double         Scalp_SL_ATR_Mult  = 0.6;
 input bool           Protect_Scalp_SLTP = false;
 input bool           Adjust_All_Exclude_Scalps = false;
 
@@ -1742,64 +1745,63 @@ void TryScalpEntries()
     }
 
     // --- Priority 2: Check for Reversal signals IF no trend signal was found OR if mode allows both ---
-    if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence) allowed
-    {
-        bool foundBuyDivergence = CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp);
-        bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp);
-
-        // --- Check WPR conditions ONLY if divergence found, for SPECIAL handling ---
-                double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1); // Get H1 WPR (Scalp's HTF)
-                double wprM15  = WPRValue(TF_Scalp, 1);          // Get M15 WPR (Scalp's own TF)
-
-                // Conditions based on NEW logic: M15 extreme, H1 normal
-                bool m15Overbought = (wprM15 > WPR_Overbought_Level);
-                bool m15Oversold   = (wprM15 < WPR_Oversold_Level);
-                bool h1Normal      = (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
-
-        // Evaluate BUY Reversal
-        if (foundBuyDivergence && !buySignal)
+        if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence) allowed
         {
-            buySignal = true; // Divergence buy signal exists
-            // Check SPECIAL Scalp Reversal WPR condition (H1 Oversold, H4 Normal)
-            if (m15Oversold && h1Normal)
-            {
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Scalp Reversal";
-                isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
-                CloseOpenTrendPositions(POSITION_TYPE_BUY); // Close opposing SELL trend trades
-            }
-            // If not special, it's a standard reversal (Mode 1 only)
-            else if (currentEntryMode == 1) {
-                // magicToUse = Magic_Reversal; // Could assign standard reversal magic here if needed
-                // commentSuffix = " Reversal";
-            }
-        }
+            bool foundBuyDivergence = CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Scalp);
+            bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Scalp);
 
-        // Evaluate SELL Reversal
-        if (foundSellDivergence && !sellSignal)
-        {
-            sellSignal = true; // Divergence sell signal exists
-            // Check SPECIAL Scalp Reversal WPR condition (H1 Overbought, H4 Normal)
-            if (m15Overbought && h1Normal)
-            {
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Scalp Reversal";
-                isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
-                CloseOpenTrendPositions(POSITION_TYPE_SELL); // Close opposing BUY trend trades
-            }
-             // If not special, it's a standard reversal (Mode 1 only)
-             else if (currentEntryMode == 1) {
-                 // magicToUse = Magic_Reversal;
-                 // commentSuffix = " Reversal";
-            }
-        }
-    }
+            // --- Primary Trigger: Check WPR conditions for SPECIAL handling ---
+            double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1); // Get H1 WPR (Scalp's HTF)
+            double wprM15  = WPRValue(TF_Scalp, 1);         // Get M15 WPR (Scalp's own TF)
+            bool m15Overbought = (wprM15 > WPR_Overbought_Level);
+            bool m15Oversold   = (wprM15 < WPR_Oversold_Level);
+            bool h1Normal      = (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
 
+            // --- Secondary Confirmation (Optional): Check Momentum ---
+            // Get Momentum value (already calculated earlier as 'mom')
+            bool buyReversalMomentumOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength); // Using Scalp Strength
+            bool sellReversalMomentumOK = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength); // Using Scalp Strength
+
+            // Evaluate BUY Reversal
+            if (foundBuyDivergence && !buySignal)
+            {
+                buySignal = true; // Divergence buy signal exists
+                // Check Primary WPR Trigger AND Optional Momentum Confirmation
+                if (m15Oversold && h1Normal && buyReversalMomentumOK) // <<<--- REVISED CONDITION
+                {
+                    magicToUse = Magic_Reversal;
+                    commentSuffix = " Scalp Reversal";
+                    isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
+                    CloseOpenTrendPositions(POSITION_TYPE_BUY);
+                }
+                else if (currentEntryMode == 1) { /* standard reversal handling */ }
+            }
+
+            // Evaluate SELL Reversal
+            if (foundSellDivergence && !sellSignal)
+            {
+                sellSignal = true; // Divergence sell signal exists
+                // Check Primary WPR Trigger AND Optional Momentum Confirmation
+                if (m15Overbought && h1Normal && sellReversalMomentumOK) // <<<--- REVISED CONDITION
+                {
+                    magicToUse = Magic_Reversal;
+                    commentSuffix = " Scalp Reversal";
+                    isScalpReversalConditionMet = true; // Mark for filter bypass & closing trades
+                    CloseOpenTrendPositions(POSITION_TYPE_SELL);
+                }
+                 else if (currentEntryMode == 1) { /* standard reversal handling */ }
+            }
+        } // End Reversal Check
+    
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
     bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Scalp_Min_Strength);
     bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
     bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+    bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+    bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
+    bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;
+    bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;
     bool buyCond  = buySignal && (ag > 0 && aoBuyOK && momBuyOK);
     bool sellCond = sellSignal && (ag < 0 && aoSellOK && momSellOK);
 
@@ -2106,53 +2108,50 @@ void TryEntries()
     }
 
     // --- Priority 2: Check for Reversal signals IF no trend signal was found OR if mode allows both ---
-    if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence) allowed
-    {
-        bool foundBuyDivergence = CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade);
-        bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade);
-
-        // --- Check WPR conditions ONLY if divergence was found, to decide on SPECIAL handling ---
-        double wprH4 = WPRValue(TF_HTF_Breakout, 1); // Get H4 WPR
-        double wprH1 = WPRValue(TF_Trade, 1);       // Get H1 WPR
-        bool bothOverbought = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
-        bool bothOversold   = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
-
-        // Evaluate BUY Reversal
-        if (foundBuyDivergence && !buySignal) // Only consider if no trend buy signal exists yet
+        if(currentEntryMode == 1 || currentEntryMode == 2) // Reversal (Divergence) allowed
         {
-            buySignal = true; // A divergence buy signal exists
-            // Check if it meets the SPECIAL Main Reversal WPR condition
-            if (bothOversold)
-            {
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Main Reversal";
-                isMainReversalConditionMet = true; // Mark for filter bypass
-            }
-            // If divergence exists but WPR condition not met, it's a standard reversal.
-            else if (currentEntryMode == 1) { // Mode 1 might still use Magic_Reversal but without bypass
-                 // magicToUse = Magic_Reversal;
-                 // commentSuffix = " Reversal";
-            }
-        }
+            bool foundBuyDivergence = CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade);
+            bool foundSellDivergence = CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade);
 
-        // Evaluate SELL Reversal
-        if (foundSellDivergence && !sellSignal) // Only consider if no trend sell signal exists yet
-        {
-            sellSignal = true; // A divergence sell signal exists
-            // Check if it meets the SPECIAL Main Reversal WPR condition
-            if (bothOverbought)
+            // --- Primary Trigger: Check WPR conditions for SPECIAL handling ---
+            double wprH4 = WPRValue(TF_HTF_Breakout, 1); // Get H4 WPR
+            double wprH1 = WPRValue(TF_Trade, 1);       // Get H1 WPR (w)
+            bool bothOverbought = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
+            bool bothOversold   = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
+
+            // --- Secondary Confirmation (Optional): Check Momentum ---
+            // Get Momentum value (already calculated earlier as 'mom')
+            bool buyReversalMomentumOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength); // Pass if filter OFF OR Mom confirms exhaustion
+            bool sellReversalMomentumOK = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength); // Pass if filter OFF OR Mom confirms exhaustion
+
+            // Evaluate BUY Reversal
+            if (foundBuyDivergence && !buySignal)
             {
-                magicToUse = Magic_Reversal;
-                commentSuffix = " Main Reversal";
-                isMainReversalConditionMet = true; // Mark for filter bypass
+                buySignal = true; // A divergence buy signal exists
+                // Check Primary WPR Trigger AND Optional Momentum Confirmation
+                if (bothOversold && buyReversalMomentumOK) // <<<--- REVISED CONDITION
+                {
+                    magicToUse = Magic_Reversal;
+                    commentSuffix = " Main Reversal";
+                    isMainReversalConditionMet = true; // Mark for filter bypass
+                }
+                else if (currentEntryMode == 1) { /* standard reversal handling */ }
             }
-             // If not special, standard reversal handling (Mode 1 only?)
-             else if (currentEntryMode == 1) {
-                 // magicToUse = Magic_Reversal;
-                 // commentSuffix = " Reversal";
-             }
-        }
-    }
+
+            // Evaluate SELL Reversal
+            if (foundSellDivergence && !sellSignal)
+            {
+                sellSignal = true; // A divergence sell signal exists
+                // Check Primary WPR Trigger AND Optional Momentum Confirmation
+                if (bothOverbought && sellReversalMomentumOK) // <<<--- REVISED CONDITION
+                {
+                    magicToUse = Magic_Reversal;
+                    commentSuffix = " Main Reversal";
+                    isMainReversalConditionMet = true; // Mark for filter bypass
+                }
+                 else if (currentEntryMode == 1) { /* standard reversal handling */ }
+            }
+        } // End Reversal Check
 
     // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
     // --- Williams %R gating ---
@@ -2169,6 +2168,10 @@ void TryEntries()
     bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
 
     // --- Combine signals with confirmations ---
+    bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0); // True if filter off OR Alligator bullish
+    bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0); // True if filter off OR Alligator bearish
+    bool finalAOBuyOK    = !Use_AO_Filter || aoBuyOK;       // True if filter off OR AO check passed
+    bool finalAOSellOK   = !Use_AO_Filter || aoSellOK;      // True if filter off OR AO check passed
     bool buyCond  = buySignal && (ag > 0 && aoBuyOK && wBuyOK && hOK && momBuyOK);
     bool sellCond = sellSignal && (ag < 0 && aoSellOK && wSellOK && hOK && momSellOK);
 
