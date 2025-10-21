@@ -1807,10 +1807,14 @@ void TryScalpEntries()
     {
         double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1);
         double wprM15  = WPRValue(TF_Scalp, 1);
-        bool wprBuyTriggerOK  = (wprM15 < WPR_Oversold_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
-        bool wprSellTriggerOK = (wprM15 > WPR_Overbought_Level) && (wprH1 <= WPR_Overbought_Level && wprH1 >= WPR_Oversold_Level);
-        bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
-        bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
+        double momM15 = MomentumValue(TF_Scalp, 1);       // Use the 'mom' variable already calculated earlier
+        double momH1  = MomentumValue(TF_Scalp_Gate_HTF, 1); // *** ADD THIS LINE ***
+        bool wprBuyTriggerOK  = (wprM15 < WPR_Oversold_Level) && (wprH1 < WPR_Oversold_Level); // Both M15 and H1 must be Oversold
+        bool wprSellTriggerOK = (wprM15 > WPR_Overbought_Level) && (wprH1 > WPR_Overbought_Level); // Both M15 and H1 must be Overbought
+        bool buyMomentumConfirmOK = (momM15 < 100.0 && (100.0 - momM15) >= Mom_Scalp_Min_Strength) &&
+                                        (momH1 < 100.0 && (100.0 - momH1) >= Mom_Scalp_Min_Strength); // Check H1 Mom too
+            bool sellMomentumConfirmOK = (momM15 > 100.0 && (momM15 - 100.0) >= Mom_Scalp_Min_Strength) &&
+                                         (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Scalp_Min_Strength); // Check H1 Mom too
 
         if (wprBuyTriggerOK && buyMomentumConfirmOK)
         {
@@ -2178,11 +2182,15 @@ void TryEntries()
     {
         double wprH4 = WPRValue(TF_HTF_Breakout, 1);
         double wprH1 = WPRValue(TF_Trade, 1);
+        double momH1 = MomentumValue(TF_Trade, 1);
+        double momH4 = MomentumValue(TF_HTF_Breakout, 1); //
         bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
         bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
-        bool buyMomentumConfirmOK = (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
-        bool sellMomentumConfirmOK = (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
-
+        bool buyMomentumConfirmOK = (momH1 < 100.0 && (100.0 - momH1) >= Mom_Min_Strength) &&
+                                        (momH4 < 100.0 && (100.0 - momH4) >= Mom_Min_Strength); // Check H4 Mom too
+            bool sellMomentumConfirmOK = (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Min_Strength) &&
+                                         (momH4 > 100.0 && (momH4 - 100.0) >= Mom_Min_Strength); // Check H4 Mom too
+        
         if (wprBuyTriggerOK && buyMomentumConfirmOK)
         {
             buySignal = true;
