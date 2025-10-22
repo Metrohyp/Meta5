@@ -56,9 +56,9 @@ input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_M15; // Main trade pending o
 
 input bool           Scalp_Use_Pending_Stop_Entries = true;
 input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending orders Timeframe to watch.
+
 // --- NEW: Retracement Limit Entry Settings ---
 input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit order on pullback.
-
 
 // HTF divergence filter inputs (add with other 'input' lines)
 input bool    Use_HTF_Filter            = true;                    // enable HTF divergence filter
@@ -71,6 +71,8 @@ input ENUM_TIMEFRAMES TF_Scalp_HTF_Divergence = PERIOD_H1; // HTF Divergence fil
 input bool           Use_OverboughtOversold_Filter = true; // Block entries in extreme WPR zones.
 input double         WPR_Overbought_Level          = -15;  // Level above which buys are blocked.
 input double         WPR_Oversold_Level            = -85;  // Level below which sells are blocked.
+input bool           Use_Anti_Chasing_Filter = true; // NEW: Block entries if >50% to TP
+input double         Anti_Chasing_Filter_Percent = 80.0; // Block entries if > X% to TP
 
 // --- Proactive & Emergency Exits ---
 input bool           Use_Momentum_Exit_Filter = true; // If true, exits on signs of trend exhaustion (divergence).
@@ -125,6 +127,7 @@ input int            Required_Confirmation_Candles = 2;  // Number of follow-up 
 input bool           Use_H1H4_Filter    = true;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
 input int            Max_Entry_Stages   = 10;        // Allow adding to a trade up to X times.
+input int            Stage_Cooldown_Bars = 2; // Bars to wait before adding next stage
 input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
@@ -2168,6 +2171,36 @@ void TryScalpEntries()
         if (!buy && finalSL <= entryPrice) finalSL = entryPrice + 2.0 * atr;
         SanitizeStops(buy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, finalSL, finalTP);
     }
+    
+    // --- NEW: Anti-Chasing Filter (Custom %) ---
+        if(Use_Anti_Chasing_Filter && finalTP > 0 && finalSL > 0)
+        {
+            if (buy) // BUY
+            {
+                double totalDistance = finalTP - finalSL;
+                double currentProgress = entryPrice - finalSL;
+                if (totalDistance > 0 && currentProgress > 0)
+                {
+                    if (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))
+                    {
+                        return; // Block BUY
+                    }
+                }
+            }
+            else // SELL
+            {
+                double totalDistance = finalSL - finalTP;
+                double currentProgress = finalSL - entryPrice;
+                if (totalDistance > 0 && currentProgress > 0)
+                {
+                    if (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))
+                    {
+                        return; // Block SELL
+                    }
+                }
+            }
+        }
+        // --- End Anti-Chasing Filter ---
 
     double riskPtsForLots = buy ? (entryPrice - finalSL) / _Point : (finalSL - entryPrice) / _Point;
     if (riskPtsForLots <= MinStopPoints()) return;
@@ -2514,7 +2547,19 @@ void TryEntries()
             if(!tpOk) { double leg = MathAbs(pH - pL); tp = pH + 2.618 * leg; }
             
             bool allowStage=false;
-            if(!Use_ST_Flip_Retest){ allowStage=true; }
+            if(!Use_ST_Flip_Retest)
+                        {
+                            // Check if enough bars have passed since the last stage
+                            long secondsSinceLastStage = barTime - lastStageBar;
+                            long requiredSeconds = (long)PeriodSeconds(TF_Trade) * Stage_Cooldown_Bars;
+                            
+                            // If it's the first stage (stageCount == 0), always allow it.
+                            // Otherwise, enforce the cooldown.
+                            if (stageCount == 0 || secondsSinceLastStage >= requiredSeconds)
+                            {
+                                allowStage = true;
+                            }
+                        }
             else {
                 bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength); // Re-check AO for retest
                 double tol = Retest_ATR_Tolerance * atr;
@@ -2534,6 +2579,21 @@ void TryEntries()
             if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp - (TP_Pullback_ATR_Mult * atr); }
             if((entry - sl) <= 0) return;
             if (tp <= entry) { return; }
+            // --- NEW: Anti-Chasing Filter (Custom %) ---
+                        if(Use_Anti_Chasing_Filter && tp > 0 && sl > 0)
+                        {
+                            double totalDistance = tp - sl;
+                            double currentProgress = entry - sl;
+                            // Check if progress is valid and has exceeded the allowed percentage
+                            if (totalDistance > 0 && currentProgress > 0)
+                            {
+                                if (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))
+                                {
+                                    return; // Block trade, past the allowed percentage
+                                }
+                            }
+                        }
+                        // --- End Anti-Chasing Filter ---
             if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr;
                 bool retraceOK = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tolX); bool breakoutOK = (c >= (pH + Breakout_ATR_Margin * atr));
                 if(!(retraceOK || breakoutOK)) return; }
@@ -2595,7 +2655,19 @@ void TryEntries()
             if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; }
             
             bool allowStage=false;
-            if(!Use_ST_Flip_Retest){ allowStage=true; }
+            if(!Use_ST_Flip_Retest)
+                        {
+                            // Check if enough bars have passed since the last stage
+                            long secondsSinceLastStage = barTime - lastStageBar;
+                            long requiredSeconds = (long)PeriodSeconds(TF_Trade) * Stage_Cooldown_Bars;
+
+                            // If it's the first stage (stageCount == 0), always allow it.
+                            // Otherwise, enforce the cooldown.
+                            if (stageCount == 0 || secondsSinceLastStage >= requiredSeconds)
+                            {
+                                allowStage = true;
+                            }
+                        }
             else {
                 bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength); // Re-check AO for retest
                 double tol = Retest_ATR_Tolerance * atr;
@@ -2615,6 +2687,21 @@ void TryEntries()
             if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
             if((sl - entry) <= 0) return;
             if (tp >= entry) { return; }
+            // --- NEW: Anti-Chasing Filter (Custom %) ---
+                        if(Use_Anti_Chasing_Filter && tp > 0 && sl > 0)
+                        {
+                            double totalDistance = sl - tp;
+                            double currentProgress = sl - entry;
+                            // Check if progress is valid and has exceeded the allowed percentage
+                            if (totalDistance > 0 && currentProgress > 0)
+                            {
+                                if (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))
+                                {
+                                    return; // Block trade, past the allowed percentage
+                                }
+                            }
+                        }
+                        // --- End Anti-Chasing Filter ---
             if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr;
                 bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr));
                 if(!(retraceOK || breakoutOK)) return; }
