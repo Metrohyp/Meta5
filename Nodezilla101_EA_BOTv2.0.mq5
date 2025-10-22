@@ -32,15 +32,15 @@ input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF
 
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
-input double         Risk_Percent     = 10;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
-input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
+input double         Risk_Percent     = 20;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Fixed_Lots       = 0.20;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
 input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
-input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 10;      // if >0, overrides and uses this absolute % just for scalps
+input double         Fixed_Lots_Scalp = 0.20;      // scalp trades Lot size.
+input double         Risk_Percent_Scalp = 20;      // if >0, overrides and uses this absolute % just for scalps
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
@@ -54,7 +54,7 @@ input bool           Cancel_Pending_On_Flip = true; // Cancel pending orders if 
 input bool           Use_Pending_Stop_Entries = true;
 input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_M15; // Main trade pending orders Timeframe to watch.
 
-input bool           Scalp_Use_Pending_Stop_Entries = true;
+input bool           Scalp_Use_Pending_Stop_Entries = false;
 input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending orders Timeframe to watch.
 // --- NEW: Retracement Limit Entry Settings ---
 input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit order on pullback.
@@ -152,9 +152,9 @@ input int            Trade_End_Min     = 0;      // End minute (e.g., 0)
 input bool Use_Alligator_Filter = true; // Use Alligator state for confirmation
 input bool Use_AO_Filter = false;        // Use Awesome Oscillator strength for confirmation
 input bool           Use_Momentum_Filter = true;   // true = require Momentum confirmation
+input bool Use_Stochastic_Filter = true;        // Use Stochastic Oscillator 20/80 cross for confirmation
 
 // --- NEW: Stochastic Filter ---
-input bool Use_Stochastic_Filter = true;        // Use Stochastic Oscillator 20/80 cross for confirmation
 input int  Stoch_K_Period        = 14;        // %K Length
 input int  Stoch_D_Period        = 3;         // %D Smoothing
 input int  Stoch_Slowing         = 1;         // %K Smoothing
@@ -2547,7 +2547,7 @@ void TryEntries()
                 double msgEntryPrice = entry;
                 if(Use_Pending_Stop_Entries)
                 {
-                    if(CountPendingThisEA()>0) return;
+                    if(CountPendingThisEA()>0 && stageCount == 0) return;
                     double hi1 = iHigh(_Symbol, TF_Trade, 1);
                     double stopPrice = hi1 + StopEntry_Offset_ATR * atr;
                     double riskPtsForLots = (stopPrice - sl) / _Point;
@@ -2628,7 +2628,7 @@ void TryEntries()
                 double msgEntryPrice = entry;
                 if(Use_Pending_Stop_Entries) // Pending Sell Stop
                 {
-                    if(CountPendingThisEA()>0) return;
+                    if(CountPendingThisEA()>0 && stageCount == 0) return;
                     double lo1 = iLow(_Symbol, TF_Trade, 1);
                     double stopPrice = lo1 - StopEntry_Offset_ATR * atr;
                     double riskPtsForLots = (sl - stopPrice) / _Point;
