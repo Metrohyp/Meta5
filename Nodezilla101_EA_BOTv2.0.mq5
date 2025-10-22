@@ -32,7 +32,7 @@ input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF
 
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
-input double         Risk_Percent     = 20;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Risk_Percent     = 5;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.20;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
@@ -40,7 +40,7 @@ input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.20;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 20;      // if >0, overrides and uses this absolute % just for scalps
+input double         Risk_Percent_Scalp = 5;      // if >0, overrides and uses this absolute % just for scalps
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
@@ -54,7 +54,7 @@ input bool           Cancel_Pending_On_Flip = true; // Cancel pending orders if 
 input bool           Use_Pending_Stop_Entries = true;
 input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_M15; // Main trade pending orders Timeframe to watch.
 
-input bool           Scalp_Use_Pending_Stop_Entries = false;
+input bool           Scalp_Use_Pending_Stop_Entries = true;
 input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending orders Timeframe to watch.
 // --- NEW: Retracement Limit Entry Settings ---
 input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit order on pullback.
