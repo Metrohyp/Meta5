@@ -27,12 +27,12 @@ input long            TG_THREAD_ID         = 0;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Master Strategy Selection ---
-input int            Entry_Mode = 2; // 0=Trend-Following, 1=Reversal (Divergence), 2=BOTH
+input int            Entry_Mode = 0; // 0=Trend-Following, 1=Reversal (Divergence), 2=BOTH
 input int            Directional_Filter_Mode = 0; // 0=HTF Trend/Breakout, 1=HTF Divergence
 
 // --- Main Strategy ---
 input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;    // The timeframe the main strategy runs on.
-input double         Risk_Percent     = 5;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
+input double         Risk_Percent     = 10;          // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.50;       // Lot size for main trades if Risk_Percent is 0.
 
 // --- Scalp Strategy ---
@@ -40,7 +40,7 @@ input bool           Use_Scalp_Mode   = true;     // scalping engine on/off.
 input ENUM_TIMEFRAMES TF_Scalp        = PERIOD_M15;   // scalp strategy timeframe.
 input bool           Scalp_Use_Fixed_Lot = false;  // true = use fixed lot below, false = use risk %
 input double         Fixed_Lots_Scalp = 0.50;      // scalp trades Lot size.
-input double         Risk_Percent_Scalp = 5;      // if >0, overrides and uses this absolute % just for scalps
+input double         Risk_Percent_Scalp = 10;      // if >0, overrides and uses this absolute % just for scalps
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
@@ -85,12 +85,12 @@ input int Cooldown_Momentum_Bars = 5; // momentum after a win, How many bars to 
 // --- Trailing Stops ---
 input bool           Use_ATR_Trailing   = true;    // Dynamic SL that follows price based on volatility.
 input int            ATR_Period_Trail   = 10;       // <-- ATR period for the trailing stop
-input double         ATR_Trail_Mult     = 2.5;      // Multiplier for ATR Trail. Higher = wider trail.
+input double         ATR_Trail_Mult     = 3.5;      // Multiplier for ATR Trail. Higher = wider trail.
 input bool           Use_HalfStep_Trailing = false;  // Alternative trail: SL moves half the distance to TP.
 input bool           HalfTrail_NewBar_Only = true; // <-- Only update half-step on new bars
 
 // --- Break-Even ---
-input double         BE_Activation_TP_Percent = 15.0; // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Activation_TP_Percent = 20.0; // Move SL to BE when trade is X% of the way to TP.
 input double         BE_Profit_Percent        = 5.0;  // lock in at BE profit (as % of TP).
 input double         BE_Buffer_Points         = 100.0; // Profit gap in points for BE (e.g., 100)
 
@@ -100,9 +100,9 @@ input double         Partial_Close_TP_Percent  = 90.0;  // Trigger partial close
 input double         Partial_Close_Volume_Percent = 50.0; // Close X% of the position volume
 
 // --- Emergency Exit ---
-input bool           Use_Volatility_Entry_Filter = false; // Block new entries if last candle was too big
+input bool           Use_Volatility_Entry_Filter = true; // Block new entries if last candle was too big
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
-input double         CircuitBreaker_ATR_Mult = 4.5;    // Closes all if a candle is > X times the average size.
+input double         CircuitBreaker_ATR_Mult = 6.5;    // Closes all if a candle is > X times the average size.
 
 // --- Profit Targets (Risk/Reward) ---
 input double         RR_Min           = 2.0;      // MINIMUM R:R for main trades.
@@ -267,6 +267,7 @@ bool     g_momentumCooldownActive = false;
 datetime g_cooldownStartTime      = 0;
 ulong g_partialClosedTickets[]; // Array to track tickets that have been partially closed
 bool sent = false;
+int      g_marketRetracePlacedDir = 0; // +1=Buy, -1=Sell, 0=None for Retrace Market Entry
 //============================== Utils ===============================
 string tfstr(ENUM_TIMEFRAMES tf)
 {
@@ -754,6 +755,143 @@ void ManageRetraceLimitOrders()
     else
     {
         Trade.SellLimit(lots, limit_price, _Symbol, new_sl, new_tp, time_type, expiration, "V25 Sell Retrace Limit");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Executes a Market Order if price touches the M15 ST line.        |
+//+------------------------------------------------------------------+
+void ManageRetraceMarketEntry()
+{
+    // --- 1. Guards ---
+    if (!Auto_Trade) return;
+    if (g_marketRetracePlacedDir != 0) return; // Already placed for this trend direction
+    
+    // --- 2. Get Main Trend Direction (TF_Trade) ---
+    double st_main_line;
+    int    st_main_dir;
+    if (!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, st_main_line, st_main_dir))
+        return;
+        
+    // --- 3. Reset Flag if Trend Flipped ---
+    // If the main trend dir (e.g., +1) is different from our flag (e.g., -1), reset the flag to 0
+    if (st_main_dir != g_marketRetracePlacedDir)
+    {
+        g_marketRetracePlacedDir = 0;
+    }
+
+    // --- 4. If already placed (or no trend), exit ---
+    if (g_marketRetracePlacedDir != 0 || st_main_dir == 0)
+        return;
+        
+    // --- 5. Get Retrace ST Line (M15) ---
+    double st_retrace_line;
+    int    st_retrace_dir;
+    if (!CalcSuperTrend(TF_Main_Cancel_Gate, ST_ATR_Period, ST_ATR_Mult, 1, st_retrace_line, st_retrace_dir))
+        return;
+        
+    // --- 6. Check for Alignment ---
+    // Only proceed if main trend and retrace trend are aligned
+    if (st_main_dir != st_retrace_dir)
+        return;
+        
+    // --- 7. Check for "Touch" on Current M15 Bar (Bar 0) ---
+    double currentHigh = iHigh(_Symbol, TF_Main_Cancel_Gate, 0);
+    double currentLow  = iLow(_Symbol, TF_Main_Cancel_Gate, 0);
+    
+    bool touch = false;
+    bool isBuy = (st_main_dir > 0);
+    
+    if (isBuy && currentLow <= st_retrace_line)
+    {
+        touch = true; // Buy signal: current low touched the (lower) ST line
+    }
+    else if (!isBuy && currentHigh >= st_retrace_line)
+    {
+        touch = true; // Sell signal: current high touched the (upper) ST line
+    }
+    
+    if (!touch)
+        return;
+        
+    // --- 8. Check Max Position Guard ---
+    if(One_Trade_At_A_Time && CountOpen() > 0)
+    {
+        return;
+    }
+        
+    // --- 9. BUILD SL/TP (copied from TryEntries for consistency) ---
+    double pH_main, pL_main, atr_main;
+    if (!GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH_main, pL_main, atr_main))
+        return;
+    if (atr_main <= 0.0)
+        return;
+        
+    double new_sl = 0.0, new_tp = 0.0;
+    double entryPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    if(isBuy)
+    {
+        if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(true, entryPrice, atr_main, pH_main, pL_main, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, new_sl)) return; }
+        else { new_sl = pL_main - ATR_SL_Buffer_Mult * atr_main; }
+        
+        if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr_main; new_sl = MathMin(new_sl, st_main_line - stPad); }
+        
+        bool tpOk=false;
+        if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(true, entryPrice, new_sl, atr_main, pH_main, pL_main, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) new_tp = dynTP; }
+        if(!tpOk) { double leg = MathAbs(pH_main - pL_main); new_tp = pH_main + 2.618 * leg; }
+    }
+    else // Sell
+    {
+        if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entryPrice, atr_main, pH_main, pL_main, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, new_sl)) return; }
+        else { new_sl = pH_main + ATR_SL_Buffer_Mult * atr_main; }
+        
+        if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr_main; new_sl = MathMax(new_sl, st_main_line + stPad); }
+        
+        bool tpOk=false;
+        if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entryPrice, new_sl, atr_main, pH_main, pL_main, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) new_tp = dynTP; }
+        if(!tpOk) { double leg = MathAbs(pH_main - pL_main); new_tp = pL_main - 2.618 * leg; }
+    }
+
+    // --- 10. Sanitize & Calculate Lots ---
+    SanitizeStops(isBuy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, new_sl, new_tp);
+
+    if (isBuy && (entryPrice - new_sl <= 0 || new_tp <= entryPrice)) return;
+    if (!isBuy && (new_sl - entryPrice <= 0 || new_tp >= entryPrice)) return;
+
+    double riskPts = isBuy ? (entryPrice - new_sl) / _Point : (new_sl - entryPrice) / _Point;
+    
+    if (riskPts <= MinStopPoints()) return;
+    
+    double lots = LotsByRisk(Risk_Percent, riskPts);
+    if(lots <= 0) lots = Fixed_Lots;
+
+    // --- 11. Send Trade ---
+    string comment = isBuy ? "V25 Buy Retrace Market" : "V25 Sell Retrace Market";
+    Trade.SetExpertMagicNumber(Magic); // Use main magic number
+    bool orderSent = false;
+    
+    if(isBuy)
+    {
+       Trade.Buy(lots, _Symbol, entryPrice, new_sl, new_tp, comment);
+       orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+    }
+    else
+    {
+       Trade.Sell(lots, _Symbol, entryPrice, new_sl, new_tp, comment);
+       orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+    }
+    
+    // --- 12. Set flag and send alert ---
+    if (orderSent)
+    {
+       g_marketRetracePlacedDir = st_main_dir; // Set flag to +1 or -1
+       SendTG(StringFormat("✅ Market Retrace %s placed at %.5f (M15 ST Touch)", isBuy ? "BUY" : "SELL", entryPrice));
+       lastTradeBarTime = iTime(_Symbol, TF_Trade, 0); // Update cooldown
+    }
+    else
+    {
+       SendTG(StringFormat("❌ Market Retrace %s failed: ret=%d", isBuy ? "BUY" : "SELL", Trade.ResultRetcode()));
     }
 }
 
@@ -1316,9 +1454,11 @@ bool RecentSwings(ENUM_TIMEFRAMES tf, int lookback, int &barHigh, double &priceH
 
 //============================== Position/Risk Management Utilities (Called by Core Logic) =========================
 
-// NEW FUNCTION: Closes all positions on the current symbol in an emergency
+// MODIFIED FUNCTION: Closes all positions and only alerts if closes occurred
 void EmergencyCloseAllPositions(const string reason)
 {
+    int positionsClosedCount = 0; // Counter for closed positions
+
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         ulong ticket = PositionGetTicket(i);
@@ -1326,20 +1466,33 @@ void EmergencyCloseAllPositions(const string reason)
         {
             if(PositionGetString(POSITION_SYMBOL) == _Symbol)
             {
-                Trade.PositionClose(ticket, 10);
+                if(Trade.PositionClose(ticket, 10)) // Try to close
+                {
+                    // Check if the close was successful (retcode might vary, but DONE/PLACED are good signs)
+                    if(Trade.ResultRetcode() == TRADE_RETCODE_DONE || Trade.ResultRetcode() == TRADE_RETCODE_PLACED)
+                    {
+                        positionsClosedCount++; // Increment counter if close succeeded
+                    }
+                }
             }
         }
     }
-    
-    string alertMsg = StringFormat(
-                                   "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
-                                   "📊 <b>Symbol:</b> %s\n"
-                                   "⚡ <b>Reason:</b> %s\n\n"
-                                   "<i>All positions have been closed to prevent further loss.</i>",
-                                   _Symbol, reason
-                                   );
-    SendTG(alertMsg);
+
+    // --- Only send alert IF positions were actually closed in THIS call ---
+    if (positionsClosedCount > 0)
+    {
+        string alertMsg = StringFormat(
+                                       "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
+                                       "📊 <b>Symbol:</b> %s\n"
+                                       "⚡ <b>Reason:</b> %s\n\n"
+                                       "<i>%d position(s) have been closed to prevent further loss.</i>", // Updated message
+                                       _Symbol, reason, positionsClosedCount // Show how many were closed
+                                       );
+        SendTG(alertMsg);
+    }
+    // --- If positionsClosedCount is 0, no alert is sent ---
 }
+
 // NEW FUNCTION: Syncs all open stops to the latest SL, but only if it's an improvement
 void SyncAllStopsSafely(double latestSL)
 {
@@ -2688,44 +2841,68 @@ void ManageOpenPositions()
         
         // In ManageOpenPositions() function - ADD THIS BLOCK after trend flip checks
         
-        // ======================= MOMENTUM DIVERGENCE EXIT (TIER 1.5) =======================
-                if(Use_Momentum_Exit_Filter && isEA) // Only for EA trades, not manual
-                {
-                    // --- NEW: Determine correct timeframe based on trade type ---
-                    ENUM_TIMEFRAMES divergenceTF = isScalp ? TF_Scalp : TF_Trade;
-                    // --- END NEW ---
+        // [REPLACE THE BLOCK from line 869 to 882 with this]
 
-                    if(CheckMomentumDivergence(type, Divergence_Lookback_Bars, divergenceTF)) // <-- Uses dynamic timeframe
-                    {
-                        // --- Calculate P/L Before Closing ---
-                        double potentialProfit = 0;
-                        double swap = PositionGetDouble(POSITION_SWAP);
-                        double fee = 0;
-                        if (type == POSITION_TYPE_BUY) {
-                            potentialProfit = (cur - entry) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-                        } else { // SELL
-                            potentialProfit = (entry - cur) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-                        }
-                        double potentialNet = potentialProfit + swap + fee;
-                        string profitEmoji = (potentialNet >= 0) ? "✅" : "❌";
-                        string profitSign  = (potentialNet >= 0) ? "+" : "";
-
-                        if(Trade.PositionClose(ticket))
+                // ======================= MOMENTUM DIVERGENCE EXIT (TIER 1.5) =======================
+                        if(Use_Momentum_Exit_Filter && isEA) // Only for EA trades, not manual
                         {
-                            // --- MODIFIED: Use correct timeframe in alert message ---
-                            SendTG(StringFormat("</b>%s %s closed:</b>\n"
-                                                "</b>MOMENTUM DIVERGENCE</b>\n"
-                                                "<b>Detected on</b>: %s.\n" // <-- Uses dynamic timeframe
-                                                "<b>💰 Profit/Loss:</b> %s%.2f"
-                                                "<b>(Exit: %.2f)</b>",
-                                                profitEmoji, pcomment,
-                                                tfstr(divergenceTF), // <-- Uses dynamic timeframe
-                                                profitSign, potentialNet, cur));
-                            // --- END MODIFICATION ---
+                            // --- 1. Calculate Progress to TP ---
+                            double totalDistToTP = (type == POSITION_TYPE_BUY) ? (tp - entry) : (entry - tp);
+                            double currentProgress = (type == POSITION_TYPE_BUY) ? (cur - entry) : (entry - cur);
+                            double progressPercent = 0.0;
+                            
+                            if (totalDistToTP > 0)
+                            {
+                                progressPercent = (currentProgress / totalDistToTP) * 100.0;
+                            }
+
+                            // --- 2. Only check for divergence if progress is >= 95% ---
+                            if (progressPercent >= 95.0)
+                            {
+                                // --- Determine correct timeframe based on trade type ---
+                                ENUM_TIMEFRAMES divergenceTF = isScalp ?
+        TF_Scalp : TF_Trade;
+                                // --- END NEW ---
+
+                                if(CheckMomentumDivergence(type, Divergence_Lookback_Bars, divergenceTF)) // <-- Uses dynamic timeframe
+                                {
+                                    // --- Calculate P/L Before Closing ---
+                            
+                double potentialProfit = 0;
+                                    double swap = PositionGetDouble(POSITION_SWAP);
+                                    double fee = 0;
+        if (type == POSITION_TYPE_BUY) {
+                                        potentialProfit = (cur - entry) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+        } else { // SELL
+                                        potentialProfit = (entry - cur) * PositionGetDouble(POSITION_VOLUME) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+        }
+                                    double potentialNet = potentialProfit + swap + fee;
+        string profitEmoji = (potentialNet >= 0) ? "✅" : "❌";
+                                    string profitSign  = (potentialNet >= 0) ?
+        "+" : "";
+
+                                    if(Trade.PositionClose(ticket))
+                                    {
+                                        // --- MODIFIED: Use correct timeframe in alert message ---
+                                        SendTG(StringFormat("</b>%s %s closed:</b>\n"
+                  
+                                                  "</b>MOMENTUM DIVERGENCE</b>\n"
+                                                            "<b>Detected on</b>: %s.\n" // <-- Uses dynamic timeframe
+              
+                                                      "<b>💰 Profit/Loss:</b> %s%.2f"
+                                                            "<b>(Exit: %.2f)</b>",
+               
+                                                     profitEmoji, pcomment,
+                                                            tfstr(divergenceTF), // <-- Uses dynamic timeframe
+             
+                                                       profitSign, potentialNet, cur));
+        // --- END MODIFICATION ---
+                                    }
+                                    continue;
+        // Position closed, move to next
+                                }
+                            }
                         }
-                        continue; // Position closed, move to next
-                    }
-                }
         
         // --- Breakeven (BE) & Protection Logic (Percentage Only) ---
         // Note: BE_Activation_TP_Percent must be > 0.0 to enable this block.
@@ -3056,6 +3233,8 @@ void OnTick()
             }
         }
     } // End Circuit Breaker Check
+    
+    ManageRetraceMarketEntry();
 
     // --- Part 2: Logic that runs ONCE per NEW BAR for each timeframe ---
 
@@ -3253,31 +3432,42 @@ bool IsLeapYear(int year)
     return (year%4==0 && (year%100!=0 || year%400==0));
 }
 
-// REPLACEMENT FOR OnTradeTransaction() FUNCTION
+// [REPLACE YOUR ENTIRE OnTradeTransaction FUNCTION WITH THIS]
+
+//+------------------------------------------------------------------+
+//| OnTradeTransaction                                               |
+//+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest      &req,
                         const MqlTradeResult       &res)
 {
-    // --- Check if the event is a completed trade or a deleted order ---
-    if(trans.type != TRADE_TRANSACTION_DEAL_ADD && trans.type != TRADE_TRANSACTION_ORDER_DELETE) return;
-    
-    // --- Event Type 1: A DEAL WAS MADE (POSITION OPENED OR CLOSED) ---
+    // --- We only care about deals being added or orders being deleted ---
+    if(trans.type != TRADE_TRANSACTION_DEAL_ADD && trans.type != TRADE_TRANSACTION_ORDER_DELETE)
+    {
+        return;
+    }
+
+    //==================================================================
+    //  EVENT TYPE 1: A DEAL WAS ADDED (POSITION OPENED OR CLOSED)
+    //==================================================================
     if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
     {
         ulong deal = (ulong)trans.deal;
         if(deal == 0) return;
         
-        HistorySelect(0, TimeCurrent());
-        long   entryType = (long)HistoryDealGetInteger(deal, DEAL_ENTRY);
-        string sym       = (string)HistoryDealGetString (deal, DEAL_SYMBOL);
+        // --- We must select the deal from history to read its properties ---
+        if(!HistorySelect(0, TimeCurrent())) return;
+        
+        long entryType = (long)HistoryDealGetInteger(deal, DEAL_ENTRY);
+        string sym = (string)HistoryDealGetString(deal, DEAL_SYMBOL);
         if(sym != _Symbol) return;
         
-        // --- A POSITION OPENED (FILL) ---
+        long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
+        if(mg != Magic && mg != Magic_Reversal) return; // Only this EA's trades
+
+        // --- A) POSITION WAS OPENED (DEAL_ENTRY_IN) ---
         if(entryType == DEAL_ENTRY_IN)
         {
-            long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-            if(mg != Magic && mg != Magic_Reversal) return; // Only this EA's trades
-            
             long   dType   = (long)HistoryDealGetInteger(deal, DEAL_TYPE);
             string typeStr = (dType==DEAL_TYPE_BUY) ? "BUY" : "SELL";
             string typeEmoji = (dType==DEAL_TYPE_BUY) ? "📈" : "📉";
@@ -3286,8 +3476,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             string cmt     = (string)HistoryDealGetString(deal, DEAL_COMMENT);
             bool   isScalp = (StringFind(cmt,"Scalp",0) >= 0);
             string strat   = isScalp ? "Scalp Strategy" : "Main Strategy";
-            
-            // --- ERROR FIX: Declaring these variables once for this block ---
+
             double sl=0.0, tp=0.0;
             ulong posID = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
             if(PositionSelectByTicket(posID))
@@ -3318,31 +3507,26 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             return;
         }
         
-        // --- B) POSITION CLOSED (WIN/LOSS) ---
+        // --- B) POSITION WAS CLOSED (DEAL_ENTRY_OUT or DEAL_ENTRY_OUT_BY) ---
         if(Send_Closed_Trade_Alerts && (entryType==DEAL_ENTRY_OUT || entryType==DEAL_ENTRY_OUT_BY))
         {
-            long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-            // --- Ensure we only process trades from our EA (both magic numbers) ---
-            if(mg != Magic && mg != Magic_Reversal) return;
-
+            // --- 1. Get Basic Closing Deal Info ---
             double P    = HistoryDealGetDouble (deal, DEAL_PROFIT);
             double F    = HistoryDealGetDouble (deal, DEAL_FEE);
             double C    = HistoryDealGetDouble (deal, DEAL_COMMISSION);
             double S    = HistoryDealGetDouble (deal, DEAL_SWAP);
             double net  = P + F + C + S;
-            string cmt  = (string)HistoryDealGetString(deal, DEAL_COMMENT);
+            double exitPrice = HistoryDealGetDouble(deal, DEAL_PRICE);
+            long   dealReason = HistoryDealGetInteger(deal, DEAL_REASON);
+            ulong  positionID = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+            string dealComment = (string)HistoryDealGetString(deal, DEAL_COMMENT);
 
-            // --- Activate Momentum Cooldown if the trade was profitable or break-even ---
-            if (net >= 0)
-            {
-                g_momentumCooldownActive = true;
-                g_cooldownStartTime = TimeCurrent();
-                SendTG("ℹ️ Cooldown activated after profitable trade. Switching to reversal-only mode.");
-            }
-
-            // --- Find the Original Entry Price for this Closed Position ---
+            // --- 2. Find Original Entry Deal to get more details ---
             double entryPrice = 0.0;
-            ulong positionID = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+            double tpPrice = 0.0;
+            long   originalDealType = -1; // 0=Buy, 1=Sell
+            string entryComment = "";
+
             if (positionID > 0)
             {
                 for (int i = (int)HistoryDealsTotal() - 1; i >= 0; i--)
@@ -3353,17 +3537,71 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                     if (HistoryDealGetInteger(d_ticket, DEAL_POSITION_ID) == positionID &&
                         HistoryDealGetInteger(d_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
                     {
+                        // Found the entry deal
                         entryPrice = HistoryDealGetDouble(d_ticket, DEAL_PRICE);
-                        break;
+                        originalDealType = HistoryDealGetInteger(d_ticket, DEAL_TYPE);
+                        entryComment = HistoryDealGetString(d_ticket, DEAL_COMMENT);
+                        
+                        // Get TP from the order that created this entry deal
+                        ulong orderTicket = HistoryDealGetInteger(d_ticket, DEAL_ORDER);
+                        if (HistoryOrderSelect(orderTicket))
+                        {
+                            tpPrice = HistoryOrderGetDouble(orderTicket, ORDER_TP);
+                        }
+                        break; // Stop searching
                     }
                 }
             }
 
-            // Determine the closing reason
-            string reason = "Unknown/Other";
-            long dealReason = HistoryDealGetInteger(deal, DEAL_REASON);
+            // --- 3. Check for Momentum Cooldown Logic ---
+            bool activateCooldown = false;
+            
+            // Only check if:
+            // 1. Trade was profitable (net >= 0)
+            // 2. AND Entry_Mode is NOT 0 (i.e., it's 1 or 2)
+            if (net >= 0 && Entry_Mode != 0)
+            {
+                if (dealReason == DEAL_REASON_TP)
+                {
+                    activateCooldown = true; // Case 1: Hit TP
+                }
+                else if (entryPrice > 0 && tpPrice > 0 && originalDealType != -1)
+                {
+                    // Case 2: Check for 95% progress
+                    double totalDistance = 0.0;
+                    double achievedDistance = 0.0;
+                    
+                    if (originalDealType == DEAL_TYPE_BUY) // BUY
+                    {
+                        totalDistance = MathAbs(tpPrice - entryPrice);
+                        achievedDistance = MathAbs(exitPrice - entryPrice);
+                    }
+                    else // SELL
+                    {
+                        totalDistance = MathAbs(entryPrice - tpPrice);
+                        achievedDistance = MathAbs(entryPrice - exitPrice);
+                    }
 
-            // FIXED: Use proper MQL5 deal reason constants
+                    if (totalDistance > 0)
+                    {
+                        double progressPercent = (achievedDistance / totalDistance) * 100.0;
+                        if (progressPercent >= 95.0)
+                        {
+                            activateCooldown = true;
+                        }
+                    }
+                }
+            }
+            
+            if (activateCooldown && Entry_Mode != 0) // This is now correctly checked
+            {
+                g_momentumCooldownActive = true;
+                g_cooldownStartTime = TimeCurrent();
+                SendTG("ℹ️ Cooldown activated after profitable trade (>=95% to TP). Switching to reversal-only mode.");
+            }
+
+            // --- 4. Determine Close Reason for Alert ---
+            string reason = "Unknown/Other";
             if(dealReason == DEAL_REASON_CLIENT)           reason = "Closed Manually by Client";
             else if(dealReason == DEAL_REASON_EXPERT)      reason = "Closed by EA Logic";
             else if(dealReason == DEAL_REASON_SL)          reason = "Closed by Stop Loss";
@@ -3372,65 +3610,43 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             else if(dealReason == DEAL_REASON_ROLLOVER)    reason = "Closed due to Rollover";
             else if(dealReason == DEAL_REASON_VMARGIN)     reason = "Closed by Var. Margin";
             else if(dealReason == DEAL_REASON_SPLIT)       reason = "Closed due to Split";
-            else if(cmt == "")                             reason = "Closed Manually (No Comment)";
-            else                                           reason = "Closed (Check Comment/Broker)";
+            else if(entryComment == "")                    reason = "Closed Manually (No Comment)";
+            
+            // --- 5. Format and Send Alert ---
+            string typeStr = (originalDealType == DEAL_TYPE_BUY) ? "BUY" : ((originalDealType == DEAL_TYPE_SELL) ? "SELL" : "Unknown");
+            string finalComment = (dealComment != "" && dealComment != "tp" && dealComment != "sl") ? dealComment : entryComment;
 
-            // --- Send the Telegram Alert ---
-                    // Get additional details from the closing deal
-                    double exitPrice = HistoryDealGetDouble(deal, DEAL_PRICE);
-                    long   dealType  = HistoryDealGetInteger(deal, DEAL_TYPE); // Type of the closing deal itself
-                    string typeStr = ""; // Determine original trade type (Buy/Sell)
-                    string dealComment = HistoryDealGetString(deal, DEAL_COMMENT); // Get comment from deal
-
-                    // We need to find the original entry deal to determine Buy/Sell Type correctly
-                    // (entryPrice is already found above this block)
-                    // Loop through history again briefly to find entry deal based on PositionID
-                    long originalDealType = -1; // -1 = unknown, 0 = Buy, 1 = Sell
-                    for (int i = (int)HistoryDealsTotal() - 1; i >= 0; i--)
-                    {
-                        ulong d_ticket = HistoryDealGetTicket(i);
-                        if (d_ticket == 0) continue;
-                        if (HistoryDealGetInteger(d_ticket, DEAL_POSITION_ID) == positionID &&
-                            HistoryDealGetInteger(d_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
-                        {
-                            originalDealType = HistoryDealGetInteger(d_ticket, DEAL_TYPE);
-                            // If comment wasn't set on closing deal, try getting it from entry deal
-                            if (dealComment == "" || dealComment == "tp" || dealComment == "sl") {
-                                dealComment = HistoryDealGetString(d_ticket, DEAL_COMMENT);
-                            }
-                            break;
-                        }
-                    }
-                    typeStr = (originalDealType == DEAL_TYPE_BUY) ? "BUY" : ((originalDealType == DEAL_TYPE_SELL) ? "SELL" : "Unknown");
-
-                    // Format the enhanced message
-                    string closeMsg = StringFormat(
-                                                   "%s <b>POSITION CLOSED</b>\n\n"
-                                                   "📊 <b>Symbol:</b> %s\n"
-                                                   "🔢 <b>Ticket:</b> %I64u\n" // Use Position ID as Ticket reference
-                                                   "📈 <b>Type:</b> %s\n"
-                                                   "💬 <b>Comment:</b> %s\n\n"
-                                                   "▶️ <b>Entry:</b> %s\n"
-                                                   "⏹️ <b>Exit:</b> %s\n"
-                                                   "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
-                                                   "⚡ <b>Reason:</b> %s",
-                                                   net >= 0 ? "✅" : "❌",
-                                                   _Symbol,
-                                                   positionID, // Use Position ID, as deal ticket refers to the close deal
-                                                   typeStr,
-                                                   dealComment, // Use comment retrieved
-                                                   DoubleToString(entryPrice, _Digits),
-                                                   DoubleToString(exitPrice, _Digits), // Use exit price from the closing deal
-                                                   net >= 0 ? "✅" : "❌", net >= 0 ? "+" : "", net,
-                                                   reason
-                                                   );
-                    SendTG(closeMsg);
+            string closeMsg = StringFormat(
+                                           "%s <b>POSITION CLOSED</b>\n\n"
+                                           "📊 <b>Symbol:</b> %s\n"
+                                           "🔢 <b>Ticket:</b> %I64u\n"
+                                           "📈 <b>Type:</b> %s\n"
+                                           "💬 <b>Comment:</b> %s\n\n"
+                                           "▶️ <b>Entry:</b> %s\n"
+                                           "⏹️ <b>Exit:</b> %s\n"
+                                           "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                                           "⚡ <b>Reason:</b> %s",
+                                           net >= 0 ? "✅" : "❌",
+                                           _Symbol,
+                                           positionID,
+                                           typeStr,
+                                           finalComment,
+                                           DoubleToString(entryPrice, _Digits),
+                                           DoubleToString(exitPrice, _Digits),
+                                           net >= 0 ? "✅" : "❌", net >= 0 ? "+" : "", net,
+                                           reason
+                                           );
+            SendTG(closeMsg);
+            return;
         }
     }
-    // --- Event Type 2: A PENDING ORDER WAS REMOVED ---
+
+    //==================================================================
+    //  EVENT TYPE 2: A PENDING ORDER WAS REMOVED (DELETED/EXPIRED)
+    //==================================================================
     else if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
     {
-        // --- ERROR FIX: Check req.magic instead of trans.magic ---
+        // --- We must check the REQUEST magic, not the transaction magic ---
         if(req.magic == Magic || req.magic == Magic_Reversal)
         {
             if(trans.order_type == ORDER_TYPE_BUY_LIMIT || trans.order_type == ORDER_TYPE_SELL_LIMIT)
@@ -3452,16 +3668,3 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         }
     }
 }
-
-//+------------------------------------------------------------------+
-//| ChartEvent                                                       |
-//+------------------------------------------------------------------+
-// We don't use ChartEvent, so we can keep this function empty
-// void OnChartEvent(const int id,
-//                   const long &lparam,
-//                   const double &dparam,
-//                   const string &sparam)
-// {
-// }
-
-
