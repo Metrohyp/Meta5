@@ -72,17 +72,19 @@ input bool           Use_OverboughtOversold_Filter = true; // Block entries in e
 input double         WPR_Overbought_Level          = -15;  // Level above which buys are blocked.
 input double         WPR_Oversold_Level            = -85;  // Level below which sells are blocked.
 input bool           Use_Anti_Chasing_Filter = true; // NEW: Block entries if >50% to TP
-input double         Anti_Chasing_Filter_Percent = 80.0; // Block entries if > X% to TP
+input double         Anti_Chasing_Filter_Percent = 30.0; // Block entries if > X% to TP
 
 // --- Proactive & Emergency Exits ---
 input bool           Use_Momentum_Exit_Filter = true; // If true, exits on signs of trend exhaustion (divergence).
-input int            Divergence_Lookback_Bars = 5;   // How many bars to check for divergence.
+input int            Divergence_Lookback_Bars = 15;   // How many bars to check for divergence.
+input double         Momentum_Exit_Min_TP_Percent = 15.0; // Trigger Momentum Exit only if > X% to TP
 //================================================================================
 //                 --- TRADE MANAGEMENT & EXITS ---
 //================================================================================
 
 // --- NEW: Momentum Cooldown After Win ---
-input int Cooldown_Momentum_Bars = 5; // momentum after a win, How many bars to check only.
+input int Cooldown_Momentum_Bars = 10; // momentum after a win, How many bars to check only.
+input double Cooldown_Min_TP_Percent = 95.0; // Reversal Trigger Cooldown only if > X% to TP (after a win)
 
 // --- Trailing Stops ---
 input bool           Use_ATR_Trailing   = true;    // Dynamic SL that follows price based on volatility.
@@ -347,12 +349,49 @@ string URLEncode(const string s)
 }
 //======================== Indicator Helpers =========================
 
+// NEW FUNCTION: Clean up partial closed tickets array
+void CleanupPartialClosedTickets()
+{
+    // Remove tickets for positions that no longer exist
+    for(int i = ArraySize(g_partialClosedTickets) - 1; i >= 0; i--)
+    {
+        ulong ticket = g_partialClosedTickets[i];
+        bool positionExists = false;
+        
+        // Check if position still exists
+        for(int p = 0; p < PositionsTotal(); p++)
+        {
+            ulong posTicket = PositionGetTicket(p);
+            if(posTicket == ticket)
+            {
+                positionExists = true;
+                break;
+            }
+        }
+        
+        // Remove from array if position doesn't exist
+        if(!positionExists)
+        {
+            ArrayRemove(g_partialClosedTickets, i, 1);
+        }
+    }
+    
+    // Limit array size to prevent memory issues (keep last 100)
+    if(ArraySize(g_partialClosedTickets) > 100)
+    {
+        ArrayCopy(g_partialClosedTickets, g_partialClosedTickets, 0, ArraySize(g_partialClosedTickets) - 100, 100);
+        ArrayResize(g_partialClosedTickets, 100);
+    }
+}
+
+// --- NEW: Stochastic Oscillator Helper ---
 // --- NEW: Stochastic Oscillator Helper ---
 // Returns true if successful, provides %K (main) and %D (signal) values
 bool StochasticValues(ENUM_TIMEFRAMES tf, int shift, double &k_val, double &d_val)
 {
     k_val = EMPTY_VALUE;
     d_val = EMPTY_VALUE;
+    
     // Get handle for Stochastic indicator using input parameters
     int handle = iStochastic(_Symbol, tf, Stoch_K_Period, Stoch_D_Period, Stoch_Slowing, Stoch_MA_Method, Stoch_Price_Field);
     if(handle == INVALID_HANDLE)
@@ -367,22 +406,27 @@ bool StochasticValues(ENUM_TIMEFRAMES tf, int shift, double &k_val, double &d_va
     ArraySetAsSeries(d_buff, true);
 
     bool ok = true;
-    // Copy data for the required shift + one bar before it (to check the cross)
-    // Need shift+2 bars to get data for index [shift] and [shift+1] if series=true
-    if(CopyBuffer(handle, 0, 0, shift + 2, k_buff) <= shift + 1)
+    // FIX: Copy enough data for the required shift
+    int barsNeeded = shift + 3; // Need shift + extra bars for safety
+    
+    if(CopyBuffer(handle, 0, 0, barsNeeded, k_buff) < barsNeeded)
     {
         Print("StochasticValues: Failed to copy %K buffer. Error ", GetLastError());
-        ok = false; // Main line (%K) is buffer 0
+        ok = false;
     }
-    if(CopyBuffer(handle, 1, 0, shift + 2, d_buff) <= shift + 1)
+    if(CopyBuffer(handle, 1, 0, barsNeeded, d_buff) < barsNeeded)
     {
         Print("StochasticValues: Failed to copy %D buffer. Error ", GetLastError());
-        ok = false; // Signal line (%D) is buffer 1
+        ok = false;
     }
 
     IndicatorRelease(handle); // Release the handle
 
     if(!ok) return false; // Return false if data copy failed
+
+    // FIX: Check if we have enough data for the requested shift
+    if(ArraySize(k_buff) <= shift || ArraySize(d_buff) <= shift)
+        return false;
 
     // Assign the values for the requested shift
     k_val = k_buff[shift];
@@ -391,13 +435,12 @@ bool StochasticValues(ENUM_TIMEFRAMES tf, int shift, double &k_val, double &d_va
     // Check if the values are valid numbers
     if(!MathIsValidNumber(k_val) || !MathIsValidNumber(d_val))
     {
-       // Print("StochasticValues: Indicator returned invalid number at shift ", shift);
         return false;
     }
 
     return true; // Success
 }
-// --- End NEW ---
+
 
 // --- NEW HELPER: Calculates average spread over recent bars ---
 double GetAverageSpreadBars(ENUM_TIMEFRAMES tf, int lookbackBars)
@@ -1458,43 +1501,60 @@ bool RecentSwings(ENUM_TIMEFRAMES tf, int lookback, int &barHigh, double &priceH
 //============================== Position/Risk Management Utilities (Called by Core Logic) =========================
 
 // MODIFIED FUNCTION: Closes all positions and only alerts if closes occurred
+// MODIFIED FUNCTION: Closes all positions safely without infinite loop
 void EmergencyCloseAllPositions(const string reason)
 {
     int positionsClosedCount = 0; // Counter for closed positions
-
-    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    
+    // FIX: Collect all tickets first to avoid modification during iteration
+    ulong tickets[];
+    int totalPositions = PositionsTotal();
+    
+    // First pass: collect all tickets
+    for(int i = 0; i < totalPositions; i++)
     {
         ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket))
+        if(ticket > 0)
+        {
+            int size = ArraySize(tickets);
+            ArrayResize(tickets, size + 1);
+            tickets[size] = ticket;
+        }
+    }
+    
+    // Second pass: close positions using collected tickets
+    for(int i = 0; i < ArraySize(tickets); i++)
+    {
+        if(PositionSelectByTicket(tickets[i]))
         {
             if(PositionGetString(POSITION_SYMBOL) == _Symbol)
             {
-                if(Trade.PositionClose(ticket, 10)) // Try to close
+                if(Trade.PositionClose(tickets[i], 10)) // Try to close
                 {
-                    // Check if the close was successful (retcode might vary, but DONE/PLACED are good signs)
+                    // Check if the close was successful
                     if(Trade.ResultRetcode() == TRADE_RETCODE_DONE || Trade.ResultRetcode() == TRADE_RETCODE_PLACED)
                     {
-                        positionsClosedCount++; // Increment counter if close succeeded
+                        positionsClosedCount++;
                     }
                 }
             }
         }
     }
 
-    // --- Only send alert IF positions were actually closed in THIS call ---
+    // Only send alert IF positions were actually closed in THIS call
     if (positionsClosedCount > 0)
     {
         string alertMsg = StringFormat(
-                                       "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
-                                       "📊 <b>Symbol:</b> %s\n"
-                                       "⚡ <b>Reason:</b> %s\n\n"
-                                       "<i>%d position(s) have been closed to prevent further loss.</i>", // Updated message
-                                       _Symbol, reason, positionsClosedCount // Show how many were closed
-                                       );
+            "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
+            "📊 <b>Symbol:</b> %s\n"
+            "⚡ <b>Reason:</b> %s\n\n"
+            "<i>%d position(s) have been closed to prevent further loss.</i>",
+            _Symbol, reason, positionsClosedCount
+        );
         SendTG(alertMsg);
     }
-    // --- If positionsClosedCount is 0, no alert is sent ---
 }
+
 
 // NEW FUNCTION: Syncs all open stops to the latest SL, but only if it's an improvement
 void SyncAllStopsSafely(double latestSL)
@@ -2272,485 +2332,384 @@ void TryScalpEntries()
 }
 
 
-// ====================== EA Entries ======================
+// [REPLACE THE ENTIRE TryEntries FUNCTION WITH THIS NEW VERSION]
+
 void TryEntries()
 {
+    // ====================== "MEMORY" FOR STAGING ======================
+    // These static variables "remember" the parameters from the very first signal bar of a trend.
+    static int g_lockedSignalDir = 0;     // The direction (+1 Buy, -1 Sell) of the locked-in signal
+    static double g_lockedSignalSL = 0.0;     // The locked-in Stop Loss
+    static double g_lockedSignalTP = 0.0;     // The locked-in Take Profit
+    static double g_lockedSignalEntry = 0.0;  // The locked-in Entry Price (used for pending/market)
+    static double g_lockedSignalSTLine = 0.0; // The locked-in SuperTrend line
+    static bool   g_lockedIsClean = false;    // The locked-in "IsCleanBreakout" status
+    static long   g_lockedMagic = 0;        // The locked-in Magic Number (Main or Reversal)
+    static string g_lockedComment = "";     // The locked-in Comment Suffix
+    // =================================================================
+
     // ====================== PER-BAR + COOLDOWN GUARDS ======================
     static datetime lastEvalBar = 0;
-    datetime barTime = iTime(_Symbol, TF_Trade, 0);
+datetime barTime = iTime(_Symbol, TF_Trade, 0);
     if(barTime == lastEvalBar) return;
     lastEvalBar = barTime;
-    if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
+if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
         return;
-    // ======================================================================
+// ======================================================================
 
     if (!IsTradeTime())
     {
         return;
-    }
+}
     
-    if(lastTradeBarTime == barTime) return;
-
     // --- Check Momentum Cooldown Status ---
     bool isCooldownActive = false;
     int  currentEntryMode = Entry_Mode;
-    if (g_momentumCooldownActive)
+if (g_momentumCooldownActive)
     {
         long barsPassed = (barTime - g_cooldownStartTime) / PeriodSeconds(TF_Trade);
-        if (barsPassed >= Cooldown_Momentum_Bars)
+if (barsPassed >= Cooldown_Momentum_Bars)
         {
             g_momentumCooldownActive = false;
-            SendTG("ℹ️ Cooldown over. Resuming normal entry mode.");
+SendTG("ℹ️ Cooldown over. Resuming normal entry mode.");
         }
         else
         {
             isCooldownActive = true;
-            currentEntryMode = 1; // Force Reversal (Divergence) mode
-        }
-    }
-    
-    // --- DYNAMIC SPREAD FILTER ---
-    if (Use_Dynamic_Spread_Filter && Avg_Spread_Lookback_Bars > 0 && Spread_Filter_Multiplier > 0)
-    {
-        double avgSpread = GetAverageSpreadBars(TF_Trade, Avg_Spread_Lookback_Bars);
-        if (avgSpread > 0)
-        {
-            double currentSpreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-            if (currentSpreadPoints > (avgSpread * Spread_Filter_Multiplier))
-            {
-                return; // Spread is too wide
-            }
+currentEntryMode = 1; // Force Reversal (Divergence) mode
         }
     }
 
-    // --- VOLATILITY ENTRY FILTER ---
-    if(Use_Volatility_Entry_Filter)
-    {
-        double atr = 0;
-        int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period);
-        if(hATR != INVALID_HANDLE)
-        {
-            double a[];
-            if(CopyBuffer(hATR, 0, 1, 1, a) > 0) atr = a[0];
-            IndicatorRelease(hATR);
-        }
-        double lastCandleSize = iHigh(_Symbol, TF_Trade, 1) - iLow(_Symbol, TF_Trade, 1);
-        if(atr > 0 && lastCandleSize > (atr * CircuitBreaker_ATR_Mult))
-        {
-            return;
-        }
-    }
-
-    // ================================ INDICATORS ==============================
-    double stLineM15=0, stLineH1=0, stLineH4=0;
-    int    dirM15=0, dirH1=0, dirH4=0;
+    // ================================ INDICATORS (FOR NEW SIGNAL) ==============================
+    double stLineM15=0;
+int    dirM15=0;
     if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, stLineM15, dirM15)) return;
-    if(Use_H1H4_Filter) {
-        if(!CalcSuperTrend(PERIOD_H1, ST_ATR_Period, ST_ATR_Mult, 1, stLineH1, dirH1)) return;
-        if(!CalcSuperTrend(PERIOD_H4, ST_ATR_Period, ST_ATR_Mult, 1, stLineH4, dirH4)) return;
-    }
-    int    ag = AlligatorState(TF_Trade,1);
-    double ao = AOValue(TF_Trade,1);
-    double mom = MomentumValue(TF_Trade,1);
-    double w  = WPRValue(TF_Trade,1);
-    double c  = iClose(_Symbol, TF_Trade, 1);
-    bool hOK = (!Use_H1H4_Filter) || (dirH1==dirM15 && dirH4==dirM15);
 
-    // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
-    bool buySignal = false;
-    bool sellSignal = false;
-    long magicToUse = Magic;
-    string commentSuffix = "";
-    bool isMainReversalConditionMet = false;
-
-    // --- Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
-    if (currentEntryMode == 1 || currentEntryMode == 2)
+    // --- NEW TREND DETECTION & RESET LOGIC ---
+    if (dirM15 != g_lockedSignalDir)
     {
-        double wprH4 = WPRValue(TF_HTF_Breakout, 1);
-        double wprH1 = WPRValue(TF_Trade, 1);
-        double momH1 = MomentumValue(TF_Trade, 1);
-        double momH4 = MomentumValue(TF_HTF_Breakout, 1); //
-        bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
-        bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
-        bool buyMomentumConfirmOK = (momH1 < 100.0 && (100.0 - momH1) >= Mom_Min_Strength) &&
-                                        (momH4 < 100.0 && (100.0 - momH4) >= Mom_Min_Strength); // Check H4 Mom too
-            bool sellMomentumConfirmOK = (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Min_Strength) &&
-                                         (momH4 > 100.0 && (momH4 - 100.0) >= Mom_Min_Strength); // Check H4 Mom too
-        
-        if (wprBuyTriggerOK && buyMomentumConfirmOK)
-        {
-            buySignal = true;
-            magicToUse = Magic_Reversal;
-            commentSuffix = " Main Reversal";
-            isMainReversalConditionMet = true;
-        }
-        else if (wprSellTriggerOK && sellMomentumConfirmOK)
-        {
-            sellSignal = true;
-            magicToUse = Magic_Reversal;
-            commentSuffix = " Main Reversal";
-            isMainReversalConditionMet = true;
-        }
-    }
-
-    // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
-    if (!buySignal && !sellSignal)
-    {
-        if(currentEntryMode == 0 || currentEntryMode == 2)
-        {
-            if (dirM15 > 0 && c > stLineM15) buySignal = true;
-            if (dirM15 < 0 && c < stLineM15) sellSignal = true;
-        }
-        if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2))
-        {
-            if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) {
-                 buySignal = true;
-            } else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) {
-                 sellSignal = true;
-            }
-        }
-    }
-
-    if (!buySignal && !sellSignal) {
-        return;
+        // The trend has flipped or is new. Reset everything.
+        stageCount = 0;           // Reset stage count
+        g_lockedSignalDir = 0;    // Reset locked direction
+        g_lockedSignalSL = 0.0;
+        g_lockedSignalTP = 0.0;
+        g_lockedSignalEntry = 0.0;
+        g_lockedSignalSTLine = 0.0;
+        g_lockedIsClean = false;
+        g_lockedMagic = 0;
+        g_lockedComment = "";
     }
     
-    // ======================= STEP 2: APPLY CONFIRMATION FILTERS =======================
-    bool wBuyOK  = !Use_WPR_Bias || (w > -50.0);
-    bool wSellOK = !Use_WPR_Bias || (w < -50.0);
-    if(Use_OverboughtOversold_Filter) {
-        if (w > WPR_Overbought_Level) wBuyOK = false;
-        if (w < WPR_Oversold_Level) wSellOK = false;
-    }
-    
-    bool buyCond  = false;
-    bool sellCond = false;
-
-    if (isMainReversalConditionMet)
+    // ======================= STEP 1: CALCULATE & LOCK SIGNAL PARAMETERS (Only if stageCount == 0) =======================
+    if (stageCount == 0 && dirM15 != 0) // Only check for a *new* trade if stages are 0
     {
-        if (buySignal) buyCond = true;
-        if (sellSignal) sellCond = true;
-    }
-    else // This is for Standard Trend signals (NOT Reversals)
+        // --- SPREAD/VOLATILITY FILTERS ---
+        if (Use_Dynamic_Spread_Filter && Avg_Spread_Lookback_Bars > 0 && Spread_Filter_Multiplier > 0)
         {
-            // --- Calculate Stochastic for the last 2 closed bars ---
-            double stoch_k1=EMPTY_VALUE, stoch_d1=EMPTY_VALUE; // Bar at shift 1 (most recent closed)
-            double stoch_k2=EMPTY_VALUE, stoch_d2=EMPTY_VALUE; // Bar at shift 2 (previous closed)
+            double avgSpread = GetAverageSpreadBars(TF_Trade, Avg_Spread_Lookback_Bars);
+if (avgSpread > 0 && (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) > (avgSpread * Spread_Filter_Multiplier)) return;
+}
+        if(Use_Volatility_Entry_Filter)
+        {
+            double atr_vol = 0;
+int hATR_vol = iATR(_Symbol, TF_Trade, ST_ATR_Period);
+            if(hATR_vol != INVALID_HANDLE){ double a[]; if(CopyBuffer(hATR_vol, 0, 1, 1, a) > 0) atr_vol = a[0]; IndicatorRelease(hATR_vol); }
+            double lastCandleSize = iHigh(_Symbol, TF_Trade, 1) - iLow(_Symbol, TF_Trade, 1);
+if(atr_vol > 0 && lastCandleSize > (atr_vol * CircuitBreaker_ATR_Mult)) return;
+}
+
+        // --- GATHER ALL INDICATORS FOR FILTERS ---
+        double stLineH1=0, stLineH4=0;
+int    dirH1=0, dirH4=0;
+        if(Use_H1H4_Filter) {
+            if(!CalcSuperTrend(PERIOD_H1, ST_ATR_Period, ST_ATR_Mult, 1, stLineH1, dirH1)) return;
+if(!CalcSuperTrend(PERIOD_H4, ST_ATR_Period, ST_ATR_Mult, 1, stLineH4, dirH4)) return;
+        }
+        int    ag = AlligatorState(TF_Trade,1);
+double ao = AOValue(TF_Trade,1);
+        double mom = MomentumValue(TF_Trade,1);
+        double w  = WPRValue(TF_Trade,1);
+        double c  = iClose(_Symbol, TF_Trade, 1);
+bool hOK = (!Use_H1H4_Filter) || (dirH1==dirM15 && dirH4==dirM15);
+
+        // --- GENERATE ENTRY SIGNALS based on Entry_Mode ---
+        bool buySignal = false;
+bool sellSignal = false;
+        long magicToUse = Magic;
+        string commentSuffix = "";
+        bool isMainReversalConditionMet = false;
+if (currentEntryMode == 1 || currentEntryMode == 2)
+        {
+            double wprH4 = WPRValue(TF_HTF_Breakout, 1);
+double wprH1 = WPRValue(TF_Trade, 1);
+            double momH1 = MomentumValue(TF_Trade, 1);
+            double momH4 = MomentumValue(TF_HTF_Breakout, 1);
+bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
+bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
+bool buyMomentumConfirmOK = (momH1 < 100.0 && (100.0 - momH1) >= Mom_Min_Strength) && (momH4 < 100.0 && (100.0 - momH4) >= Mom_Min_Strength);
+bool sellMomentumConfirmOK = (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Min_Strength) && (momH4 > 100.0 && (momH4 - 100.0) >= Mom_Min_Strength);
+if (wprBuyTriggerOK && buyMomentumConfirmOK) {
+                buySignal = true; magicToUse = Magic_Reversal; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
+}
+            else if (wprSellTriggerOK && sellMomentumConfirmOK) {
+                sellSignal = true; magicToUse = Magic_Reversal; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
+}
+        }
+        if (!buySignal && !sellSignal)
+        {
+            if(currentEntryMode == 0 || currentEntryMode == 2) {
+                if (dirM15 > 0 && c > stLineM15) buySignal = true;
+if (dirM15 < 0 && c < stLineM15) sellSignal = true;
+}
+            if (!buySignal && !sellSignal && (currentEntryMode == 1 || currentEntryMode == 2)) {
+                if (CheckDivergenceForEntry(POSITION_TYPE_BUY, Divergence_Lookback_Bars, TF_Trade)) { buySignal = true; }
+else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, TF_Trade)) { sellSignal = true; }
+}
+        }
+        if (!buySignal && !sellSignal) return;
+
+        // --- APPLY CONFIRMATION FILTERS ---
+        bool wBuyOK  = !Use_WPR_Bias || (w > -50.0);
+bool wSellOK = !Use_WPR_Bias || (w < -50.0);
+if(Use_OverboughtOversold_Filter) {
+            if (w > WPR_Overbought_Level) wBuyOK = false;
+if (w < WPR_Oversold_Level) wSellOK = false;
+        }
+        bool buyCond  = false;
+bool sellCond = false;
+        if (isMainReversalConditionMet) {
+            if (buySignal) buyCond = true;
+if (sellSignal) sellCond = true;
+        }
+        else {
+            double stoch_k1=EMPTY_VALUE, stoch_d1=EMPTY_VALUE, stoch_k2=EMPTY_VALUE, stoch_d2=EMPTY_VALUE;
             bool stochOK1 = StochasticValues(TF_Trade, 1, stoch_k1, stoch_d1);
-            bool stochOK2 = StochasticValues(TF_Trade, 2, stoch_k2, stoch_d2);
-
-            // --- Stochastic Confirmation (Using 20/80 Level Cross) ---
-            // For BUY: Check if %K crossed ABOVE 20 on the last closed bar
-            bool stochBuyOK  = !Use_Stochastic_Filter ||
-                               (stochOK1 && stochOK2 && stoch_k1 > 20.0 && stoch_k2 <= 20.0);
-
-            // For SELL: Check if %K crossed BELOW 80 on the last closed bar
-            bool stochSellOK = !Use_Stochastic_Filter ||
-                               (stochOK1 && stochOK2 && stoch_k1 < 80.0 && stoch_k2 >= 80.0);
-
-            // --- Other Filters ---
-            bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
-            bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
-            bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
-            bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
-            // wBuyOK/wSellOK and hOK are checked later/separately
-
-            // --- Combine Filters ---
+bool stochOK2 = StochasticValues(TF_Trade, 2, stoch_k2, stoch_d2);
+            bool stochBuyOK  = !Use_Stochastic_Filter || (stochOK1 && stochOK2 && stoch_k1 > 20.0 && stoch_k2 <= 20.0);
+bool stochSellOK = !Use_Stochastic_Filter || (stochOK1 && stochOK2 && stoch_k1 < 80.0 && stoch_k2 >= 80.0);
+bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
+bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
+bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
             if (buySignal && alligatorBuyOK && stochBuyOK && momBuyOK) buyCond = true;
-            if (sellSignal && alligatorSellOK && stochSellOK && momSellOK) sellCond = true;
-        }
-    // ======================= STEP 3: APPLY DIRECTIONAL FILTER =======================
-    if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
-        if (!isMainReversalConditionMet) {
-            bool finalFilterOK = false;
-            bool trendAlignOK = false;
-            int htf_st_dir = 0;
-            if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, stLineM15, htf_st_dir)) {
-                if(buyCond && htf_st_dir > 0) trendAlignOK = true;
-                if(sellCond && htf_st_dir < 0) trendAlignOK = true;
-            }
-            bool breakoutOK = false;
-            int bH_htf, bL_htf; double pH_htf, pL_htf;
-            if(RecentSwings(TF_HTF_Breakout, HTF_Breakout_Lookback, bH_htf, pH_htf, bL_htf, pL_htf)) {
-                double atrHTF = 0.0;
-                int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
-                if(hATR_htf != INVALID_HANDLE){ double ahtf[]; ArraySetAsSeries(ahtf,true); if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1]; IndicatorRelease(hATR_htf); }
-                if(atrHTF > 0.0){ double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1);
-                                  double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
-                                  if(buyCond && (cHTF >= (pH_htf + mHTF))) breakoutOK = true;
-                                  if(sellCond && (cHTF <= (pL_htf - mHTF))) breakoutOK = true;
+if (sellSignal && alligatorSellOK && stochSellOK && momSellOK) sellCond = true;
+}
+
+        // --- APPLY DIRECTIONAL FILTER ---
+        if(Directional_Filter_Mode == 0 && Use_HTF_Filter) {
+            if (!isMainReversalConditionMet) {
+                bool finalFilterOK = false;
+bool trendAlignOK = false;
+                int htf_st_dir = 0;
+                if(CalcSuperTrend(TF_HTF_Breakout, ST_ATR_Period, ST_ATR_Mult, 1, stLineM15, htf_st_dir)) {
+                    if(buyCond && htf_st_dir > 0) trendAlignOK = true;
+if(sellCond && htf_st_dir < 0) trendAlignOK = true;
                 }
-            }
-            switch(HTF_Filter_Mode) {
-                case 0: finalFilterOK = trendAlignOK; break;
-                case 1: finalFilterOK = breakoutOK; break;
-                case 2: finalFilterOK = trendAlignOK && breakoutOK; break;
-            }
-            if(!finalFilterOK) { buyCond = false; sellCond = false; }
-        }
-    } else if (Directional_Filter_Mode == 1) {
-        int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
-        if (htfDivergenceBias > 0) sellCond = false;
-        if (htfDivergenceBias < 0) buyCond = false;
-    }
-
-    // --- Final Check & Max Position Guard ---
-    if (!buyCond && !sellCond) return;
-    
-    // ======================= STEP 3.5: BREAKOUT CONFIRMATION FILTER (CORRECTED) =======================
-    if (Use_Breakout_Confirmation && !isMainReversalConditionMet)
-    {
+                bool breakoutOK = false;
+int bH_htf, bL_htf; double pH_htf, pL_htf;
+                if(RecentSwings(TF_HTF_Breakout, HTF_Breakout_Lookback, bH_htf, pH_htf, bL_htf, pL_htf)) {
+                    double atrHTF = 0.0; int hATR_htf = iATR(_Symbol, TF_HTF_Breakout, ST_ATR_Period);
+if(hATR_htf != INVALID_HANDLE){ double ahtf[]; ArraySetAsSeries(ahtf,true); if(CopyBuffer(hATR_htf,0,0,3,ahtf)>=2) atrHTF = ahtf[1]; IndicatorRelease(hATR_htf); }
+if(atrHTF > 0.0){ double cHTF = iClose(_Symbol, TF_HTF_Breakout, 1); double mHTF = HTF_Breakout_ATR_Margin * atrHTF;
+if(buyCond && (cHTF >= (pH_htf + mHTF))) breakoutOK = true;
+if(sellCond && (cHTF <= (pL_htf - mHTF))) breakoutOK = true;
+}
+                }
+                switch(HTF_Filter_Mode) {
+                    case 0: finalFilterOK = trendAlignOK; break;
+case 1: finalFilterOK = breakoutOK; break;
+                    case 2: finalFilterOK = trendAlignOK && breakoutOK; break;
+}
+                if(!finalFilterOK) { buyCond = false; sellCond = false; }
+}
+        } else if (Directional_Filter_Mode == 1) {
+            int htfDivergenceBias = GetHTFDivergenceDirection(TF_HTF_Divergence, Divergence_Lookback_Bars);
+if (htfDivergenceBias > 0) sellCond = false;
+            if (htfDivergenceBias < 0) buyCond = false;
+}
+        if (!buyCond && !sellCond) return;
+        
+        // --- BREAKOUT CONFIRMATION FILTER ---
         bool breakoutConfirmed = false;
-        if (buyCond)
-        {
-            breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade);
-        }
-        else if (sellCond)
-        {
-            breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade);
+if (Use_Breakout_Confirmation && !isMainReversalConditionMet) {
+            if (buyCond) { breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade); }
+else if (sellCond) { breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade); }
+} else {
+            breakoutConfirmed = true; // Not required, so it's "confirmed"
         }
 
-        if (!breakoutConfirmed)
-        {
-            return; // BLOCK THE TRADE
-        }
-    }
-    // --- End of Breakout Filter ---
-
-    if(One_Trade_At_A_Time && CountOpen()>0)
-    {
-        return;
-    }
-
-    // =========================== BUILD SL / TP & EXECUTE ============================
-    if(buyCond || sellCond)
-    {
+        // --- MAX POSITION GUARD ---
+        if(One_Trade_At_A_Time && CountOpen()>0) return;
+// --- BUILD SL/TP ---
         int bH; double pH; int bL; double pL;
         if(!RecentSwings(TF_Trade, 300, bH,pH,bL,pL)) return;
-        int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period); double atr=0.0;
+int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period); double atr=0.0;
         if(hATR!=INVALID_HANDLE){ double a[]; ArraySetAsSeries(a,true); if(CopyBuffer(hATR,0,0,3,a)>=2) atr = a[1]; IndicatorRelease(hATR); }
-        if(atr<=0.0) return;
-        double sl=0, tp=0;
-        double ask=SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        double bid=SymbolInfoDouble(_Symbol, SYMBOL_BID);
+if(atr<=0.0) return;
+        double sl=0, tp=0, entry=0;
 
-        if(buyCond) // --- BUY ---
-        {
-            double entry = ask;
-            if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(true, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
-            else { sl = pL - ATR_SL_Buffer_Mult * atr; }
-            
-            bool tpOk=false;
-            if(Use_RR_Range) { double chosenR=0, dynTP=0;
-                tpOk = PickRRTarget(true, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP;
-            }
-            if(!tpOk) { double leg = MathAbs(pH - pL); tp = pH + 2.618 * leg; }
-            
-            bool allowStage=false;
-            if(!Use_ST_Flip_Retest)
-                        {
-                            // Check if enough bars have passed since the last stage
-                            long secondsSinceLastStage = barTime - lastStageBar;
-                            long requiredSeconds = (long)PeriodSeconds(TF_Trade) * Stage_Cooldown_Bars;
-                            
-                            // If it's the first stage (stageCount == 0), always allow it.
-                            // Otherwise, enforce the cooldown.
-                            if (stageCount == 0 || secondsSinceLastStage >= requiredSeconds)
-                            {
-                                allowStage = true;
-                            }
-                        }
-            else {
-                bool aoBuyOK  = (ao > 0.0 && MathAbs(ao) >= AO_Min_Strength); // Re-check AO for retest
-                double tol = Retest_ATR_Tolerance * atr;
-                bool retestTouch = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tol);
-                bool confirmAway = (c >= stLineM15 + Confirm_Close_Dist_ATR * atr);
-                bool confirmOk = (ag>0 && aoBuyOK && wBuyOK && hOK && confirmAway); // REMOVED flipWaitOK
-                if(stageCount==0) allowStage = (retestTouch && confirmOk);
-                else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(+1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(+1, e0, sl0, AddEntry_Trigger_Ratio);
-                    allowStage = (retestTouch && confirmOk && nearSL); }
-            }
-            if(!allowStage || stageCount>=Max_Entry_Stages) return;
-            
-            if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMin(sl, stLineM15 - stPad); }
-            { double minPtsBuy = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point));
-                if( ((entry - sl)/_Point) < minPtsBuy ) return; }
-            { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_BUY, ssl, stp); sl=ssl; tp=stp; }
-            if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp - (TP_Pullback_ATR_Mult * atr); }
-            if((entry - sl) <= 0) return;
-            if (tp <= entry) { return; }
-            // --- NEW: Anti-Chasing Filter (Custom %) ---
-                        if(Use_Anti_Chasing_Filter && tp > 0 && sl > 0)
-                        {
-                            double totalDistance = tp - sl;
-                            double currentProgress = entry - sl;
-                            // Check if progress is valid and has exceeded the allowed percentage
-                            if (totalDistance > 0 && currentProgress > 0)
-                            {
-                                if (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))
-                                {
-                                    return; // Block trade, past the allowed percentage
-                                }
-                            }
-                        }
-                        // --- End Anti-Chasing Filter ---
-            if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr;
-                bool retraceOK = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tolX); bool breakoutOK = (c >= (pH + Breakout_ATR_Margin * atr));
-                if(!(retraceOK || breakoutOK)) return; }
+        if(buyCond) { // BUY
+            entry = Use_Pending_Stop_Entries ? (iHigh(_Symbol, TF_Trade, 1) + StopEntry_Offset_ATR * atr) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(true, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
+else { sl = pL - ATR_SL_Buffer_Mult * atr; }
+bool tpOk=false;
+if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(true, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP; }
+if(!tpOk) { double leg = MathAbs(pH - pL); tp = pH + 2.618 * leg; }
+if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMin(sl, stLineM15 - stPad); }
+double minPtsBuy = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point));
+if( ((entry - sl)/_Point) < minPtsBuy ) return;
+            SanitizeStops(POSITION_TYPE_BUY, sl, tp);
+if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp - (TP_Pullback_ATR_Mult * atr); }
+if((entry - sl) <= 0 || tp <= entry) return;
+if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iLow(_Symbol, TF_Trade, 1) <= stLineM15 + tolX); bool breakoutOK = (c >= (pH + Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
+}
+        else if(sellCond) { // SELL
+            entry = Use_Pending_Stop_Entries ? (iLow(_Symbol, TF_Trade, 1) - StopEntry_Offset_ATR * atr) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
+else { sl = pH + ATR_SL_Buffer_Mult * atr; }
+bool tpOk=false;
+if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) tp = dynTP; }
+if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; }
+if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMax(sl, stLineM15 + stPad); }
+double minPtsSell = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point));
+if( ((sl - entry)/_Point) < minPtsSell ) return;
+            SanitizeStops(POSITION_TYPE_SELL, sl, tp);
+if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
+if((sl - entry) <= 0 || tp >= entry) return;
+if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr)); if(!(retraceOK || breakoutOK)) return; }
+}
+        
+        // --- LOCK IN THE PARAMETERS ---
+        g_lockedSignalDir = buyCond ? +1 : -1;
+        g_lockedSignalSL = sl;
+        g_lockedSignalTP = tp;
+        g_lockedSignalEntry = entry;
+        g_lockedSignalSTLine = stLineM15;
+        g_lockedIsClean = breakoutConfirmed;
+        g_lockedMagic = magicToUse;
+        g_lockedComment = commentSuffix;
+        
+        // Send the initial "Setup" alert
+        SendTG(StringFormat("%s %s Setup %s %s\nST:%s Alligator:%s AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
+                           buyCond ? "📈" : "📉",
+                           buyCond ? "BUY" : "SELL",
+                           _Symbol, tfstr(TF_Trade),
+                           buyCond ? "UP" : "DOWN",
+                           buyCond ? "bull" : "bear",
+                           ao, mom, w, entry, sl, tp));
+    }
+    
+    // ======================= STEP 2: CHECK FILTERS & STAGING LOGIC (Using LOCKED Parameters) =======================
 
-            SendTG(StringFormat("📈 BUY Setup %s %s\nST:%s Alligator:bull AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
-                           _Symbol, tfstr(TF_Trade), "UP", ao, mom, w, entry, sl, tp));
-            if(Auto_Trade)
-            {
-                Trade.SetExpertMagicNumber(magicToUse);
-                bool orderSent = false;
-                double msgEntryPrice = entry;
-                if(Use_Pending_Stop_Entries)
-                {
-                    if(CountPendingThisEA()>0 && stageCount == 0) return;
-                    double hi1 = iHigh(_Symbol, TF_Trade, 1);
-                    double stopPrice = hi1 + StopEntry_Offset_ATR * atr;
-                    double riskPtsForLots = (stopPrice - sl) / _Point;
-                    double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                    msgEntryPrice = stopPrice;
-                    datetime expiration_buy = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-                    Trade.BuyStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_buy, StringFormat("V25 BuyStop%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                    
-                    string buySignalMsg = StringFormat("🟢 BUY SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
-                                                        _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
-                    SendTG(buySignalMsg);
-                }
-                else // Market Entry
-                {
-                    double orderLots = LotsByRisk(Risk_Percent, (entry - sl)/_Point);
-                    Trade.Buy(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                }
+    // If we don't have a locked-in signal for the current trend, exit.
+    if (g_lockedSignalDir != dirM15) return;
 
-                if(orderSent)
-                {
-                    SendTG(StringFormat("[📈 BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
-                    lastTradeBarTime = barTime;
-                    stageCount++;
-                    lastStageBar = barTime;
-                    if(Adjust_All_To_Latest) ApplySLTPToAllOpen(+1, sl, tp);
-                }
-                else
-                {
-                    SendTG(StringFormat("❌ BUY send failed: ret=%d", Trade.ResultRetcode()));
-                }
-            }
+    // --- Get locked parameters ---
+    bool isBuy = (g_lockedSignalDir > 0);
+    double sl = g_lockedSignalSL;
+    double tp = g_lockedSignalTP;
+    double entry = g_lockedSignalEntry; // This is the "ideal" entry from Bar 1
+    long magicToUse = g_lockedMagic;
+    string commentSuffix = g_lockedComment;
+    bool isBreakoutConfirmed = g_lockedIsClean;
+    
+    // --- 1. Anti-Chasing Filter (Uses LOCKED SL/TP) ---
+    double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double entryPriceForFilter = Use_Pending_Stop_Entries ? entry : currentPrice; // Use locked entry for pendings, current price for market
+
+    if(Use_Anti_Chasing_Filter && tp > 0 && sl > 0)
+    {
+        if (isBuy) {
+            double totalDistance = tp - sl;
+            double currentProgress = entryPriceForFilter - sl;
+            if (totalDistance > 0 && currentProgress > 0 && (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))) return;
+        } else {
+            double totalDistance = sl - tp;
+            double currentProgress = sl - entryPriceForFilter;
+            if (totalDistance > 0 && currentProgress > 0 && (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))) return;
         }
-        // =============================== SELL ===============================
-        else if(sellCond)
-        {
-            double entry = bid;
-            if(Use_Dynamic_SL_ATR) { if(!PickSL_DynamicATR(false, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl)) return; }
-            else { sl = pH + ATR_SL_Buffer_Mult * atr; }
-            
-            bool tpOk=false;
-            if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entry, sl, atr, pH, pL, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP);
-                if(tpOk) tp = dynTP; }
-            if(!tpOk) { double leg = MathAbs(pH - pL); tp = pL - 2.618 * leg; }
-            
-            bool allowStage=false;
-            if(!Use_ST_Flip_Retest)
-                        {
-                            // Check if enough bars have passed since the last stage
-                            long secondsSinceLastStage = barTime - lastStageBar;
-                            long requiredSeconds = (long)PeriodSeconds(TF_Trade) * Stage_Cooldown_Bars;
+    }
 
-                            // If it's the first stage (stageCount == 0), always allow it.
-                            // Otherwise, enforce the cooldown.
-                            if (stageCount == 0 || secondsSinceLastStage >= requiredSeconds)
-                            {
-                                allowStage = true;
-                            }
-                        }
-            else {
-                bool aoSellOK = (ao < 0.0 && MathAbs(ao) >= AO_Min_Strength); // Re-check AO for retest
-                double tol = Retest_ATR_Tolerance * atr;
-                bool retestTouch = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tol);
-                bool confirmAway = (c <= stLineM15 - Confirm_Close_Dist_ATR * atr);
-                bool confirmOk = (ag<0 && aoSellOK && wSellOK && hOK && confirmAway); // REMOVED flipWaitOK
-                 if(stageCount==0) allowStage = (retestTouch && confirmOk);
-                 else{ ulong tk; double e0, sl0; bool nearSL=false; if(GetLatestOpenPos(-1, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(-1, e0, sl0, AddEntry_Trigger_Ratio);
-                    allowStage = (retestTouch && confirmOk && nearSL); }
-            }
-            if(!allowStage || stageCount>=Max_Entry_Stages) return;
-            
-            if(Use_ST_as_Stop) { double stPad = ST_Stop_Pad_Mult * atr; sl = MathMax(sl, stLineM15 + stPad); }
-            { double minPtsSell = MathMax((int)Min_SL_Points, (int)MathRound((Min_SL_ATR_Mult*atr)/_Point));
-                if( ((sl - entry)/_Point) < minPtsSell ) return; }
-            { double ssl=sl, stp=tp; SanitizeStops(POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
-            if(TP_Pullback_ATR_Mult > 0 && tp > 0) { tp = tp + (TP_Pullback_ATR_Mult * atr); }
-            if((sl - entry) <= 0) return;
-            if (tp >= entry) { return; }
-            // --- NEW: Anti-Chasing Filter (Custom %) ---
-                        if(Use_Anti_Chasing_Filter && tp > 0 && sl > 0)
-                        {
-                            double totalDistance = sl - tp;
-                            double currentProgress = sl - entry;
-                            // Check if progress is valid and has exceeded the allowed percentage
-                            if (totalDistance > 0 && currentProgress > 0)
-                            {
-                                if (currentProgress > (totalDistance * (Anti_Chasing_Filter_Percent / 100.0)))
-                                {
-                                    return; // Block trade, past the allowed percentage
-                                }
-                            }
-                        }
-                        // --- End Anti-Chasing Filter ---
-            if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr;
-                bool retraceOK = (iHigh(_Symbol, TF_Trade, 1) >= stLineM15 - tolX); bool breakoutOK = (c <= (pL - Breakout_ATR_Margin * atr));
-                if(!(retraceOK || breakoutOK)) return; }
-
-            SendTG(StringFormat("📉 SELL Setup %s %s\nST:%s Alligator:bear AO:%.2f Mom:%.2f WPR:%.1f\nEntry: %.2f SL: %.2f TP: %.2f",
-                           _Symbol, tfstr(TF_Trade), "DOWN", ao, mom, w, entry, sl, tp));
-            if(Auto_Trade)
-            {
-                Trade.SetExpertMagicNumber(magicToUse);
-                bool orderSent = false;
-                double msgEntryPrice = entry;
-                if(Use_Pending_Stop_Entries) // Pending Sell Stop
-                {
-                    if(CountPendingThisEA()>0 && stageCount == 0) return;
-                    double lo1 = iLow(_Symbol, TF_Trade, 1);
-                    double stopPrice = lo1 - StopEntry_Offset_ATR * atr;
-                    double riskPtsForLots = (sl - stopPrice) / _Point;
-                    double orderLots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                    msgEntryPrice = stopPrice;
-                    datetime expiration_sell = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-
-                    Trade.SellStop(orderLots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration_sell, StringFormat("V25 SellStop%s", commentSuffix));
-                    orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-
-                    string sellSignalMsg = StringFormat("🔴 SELL SIGNAL DETECTED...\nSymbol: %s\nTimeframe: %s\nCurrent Price: %s\nSuperTrend: %s\nStrategy: Main Trend...",
-                                                          _Symbol, tfstr(TF_Trade), DoubleToString(entry, _Digits), DoubleToString(stLineM15, _Digits));
-                    SendTG(sellSignalMsg);
-                }
-                else // Market Sell
-                {
-                     double orderLots = LotsByRisk(Risk_Percent, (sl - entry)/_Point);
-                     Trade.Sell(orderLots, _Symbol, entry, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
-                     orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
-                }
-
-                if(orderSent)
-                {
-                     SendTG(StringFormat("[📉 SELL placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
-                    lastTradeBarTime = barTime;
-                    stageCount++;
-                    lastStageBar = barTime;
-                    if(Adjust_All_To_Latest) ApplySLTPToAllOpen(-1, sl, tp);
-                }
-                else
-                {
-                    SendTG(StringFormat("❌ SELL send failed: ret=%d", Trade.ResultRetcode()));
-                }
-            }
+    // --- 2. Staging Cooldown & Max Stages Filter ---
+    bool allowStage = false;
+    if(!Use_ST_Flip_Retest) {
+        long secondsSinceLastStage = barTime - lastStageBar;
+        long requiredSeconds = (long)PeriodSeconds(TF_Trade) * Stage_Cooldown_Bars;
+        if (stageCount == 0 || secondsSinceLastStage >= requiredSeconds) {
+            allowStage = true;
         }
+    } else {
+        // Retest logic (which you've customized to only add on drawdown)
+        double atr=0.0; int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period); if(hATR!=INVALID_HANDLE){ double a[]; ArraySetAsSeries(a,true); if(CopyBuffer(hATR,0,0,3,a)>=2) atr = a[1]; IndicatorRelease(hATR); }
+        double tol = Retest_ATR_Tolerance * atr;
+        bool retestTouch = isBuy ? (iLow(_Symbol, TF_Trade, 1) <= g_lockedSignalSTLine + tol) : (iHigh(_Symbol, TF_Trade, 1) >= g_lockedSignalSTLine - tol);
+        
+        if (stageCount == 0) {
+            allowStage = retestTouch;
+        } else {
+            ulong tk; double e0, sl0; bool nearSL = false;
+            if(GetLatestOpenPos(g_lockedSignalDir, true, tk, e0, sl0)) nearSL = ReachedRatioToSL(g_lockedSignalDir, e0, sl0, AddEntry_Trigger_Ratio);
+            allowStage = (retestTouch && nearSL);
+        }
+    }
+    if (!allowStage || stageCount >= Max_Entry_Stages) return;
+
+    // --- 3. "Is Clean Breakout" Filter (Uses LOCKED status) ---
+    if (!isBreakoutConfirmed) return; // Block trade if the initial signal was not a clean breakout
+
+
+    // ======================= STEP 3: EXECUTE TRADE (All checks passed) =======================
+    if(Auto_Trade)
+    {
+        Trade.SetExpertMagicNumber(magicToUse);
+bool orderSent = false;
+        double riskPts = 0;
+        double finalEntryPrice = 0;
+
+        if(Use_Pending_Stop_Entries)
+        {
+            if(CountPendingThisEA()>0 && stageCount == 0) return;
+finalEntryPrice = g_lockedSignalEntry; // Use the locked entry price from Bar 1
+            riskPts = isBuy ? (finalEntryPrice - sl) / _Point : (sl - finalEntryPrice) / _Point;
+double orderLots = LotsByRisk(Risk_Percent, riskPts);
+            datetime expiration = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
+            
+            if (isBuy) {
+                Trade.BuyStop(orderLots, finalEntryPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration, StringFormat("V25 BuyStop%s", commentSuffix));
+} else {
+                Trade.SellStop(orderLots, finalEntryPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration, StringFormat("V25 SellStop%s", commentSuffix));
+}
+            orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+        }
+        else // Market Entry
+        {
+            finalEntryPrice = currentPrice; // Use the *current* market price
+            riskPts = isBuy ? (finalEntryPrice - sl) / _Point : (sl - finalEntryPrice) / _Point;
+double orderLots = LotsByRisk(Risk_Percent, riskPts);
+            
+            if (isBuy) {
+                Trade.Buy(orderLots, _Symbol, 0, sl, tp, StringFormat("V25 Buy%s", commentSuffix));
+} else {
+                Trade.Sell(orderLots, _Symbol, 0, sl, tp, StringFormat("V25 Sell%s", commentSuffix));
+}
+            orderSent = (Trade.ResultRetcode() == TRADE_RETCODE_DONE);
+}
+
+        if(orderSent)
+        {
+             SendTG(StringFormat("[📈 %s placed (Stage %d)\nEntry %.2f\nSL %.2f\nTP %.2f]",
+                                  isBuy ? "BUY" : "SELL",
+                                  stageCount + 1,
+                                  finalEntryPrice, sl, tp));
+lastTradeBarTime = barTime;
+            stageCount++;
+lastStageBar = barTime;
+            if(Adjust_All_To_Latest) ApplySLTPToAllOpen(g_lockedSignalDir, sl, tp); // Sync all trades to the LOCKED SL/TP
+}
+        else
+        {
+            SendTG(StringFormat("❌ %s send failed: ret=%d", isBuy ? "BUY" : "SELL", Trade.ResultRetcode()));
+}
     }
 }
 
@@ -2825,7 +2784,7 @@ void ManageOpenPositions()
                 // If the main trend flips, close ALL positions (main, scalp, manual).
                 // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1; // <-- KEEP THIS COMMENTED
                 
-        if (prevDir_ST != 0 && main_st_dir != requiredDir)                         // <-- UNCOMMENTED
+        if (prevDir_ST != 0 && main_st_dir != prevDir_ST)                         // <-- UNCOMMENTED
                 {                                                        // <-- UNCOMMENTED
                     if (Trade.PositionClose(ticket))
                                    {
@@ -2834,7 +2793,7 @@ void ManageOpenPositions()
                                        double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
                                        double swap = PositionGetDouble(POSITION_SWAP);
                                        // Commission is harder to get accurately before deal closure, using current value as estimate
-                                       double commission = PositionGetDouble(POSITION_COMMISSION);
+                                       double commission = 0.0;
 
                                        double grossProfit = 0;
                                        if (type == POSITION_TYPE_BUY) {
@@ -2872,7 +2831,6 @@ void ManageOpenPositions()
                                    continue; // Position is closed, move to the next one.
                 }                                                        // <-- UNCOMMENTED
         
-                
         // ======================= TIER 2: SCALP TREND FLIP (SCALP ONLY) =======================
         if (isScalp && prevDir_ST != 0 && scalp_st_dir != requiredDir)
         {
@@ -2882,7 +2840,7 @@ void ManageOpenPositions()
                 double volume = PositionGetDouble(POSITION_VOLUME);
                 double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
                 double swap = PositionGetDouble(POSITION_SWAP);
-                double commission = PositionGetDouble(POSITION_COMMISSION); // Estimate
+                double commission = 0.0; // Estimate
 
                 double grossProfit = 0;
                 if (type == POSITION_TYPE_BUY) {
@@ -2944,7 +2902,7 @@ void ManageOpenPositions()
                             }
 
                             // --- 2. Only check for divergence if progress is >= 95% ---
-                            if (progressPercent >= 95.0)
+                            if (progressPercent >= Momentum_Exit_Min_TP_Percent)
                             {
                                 // --- Determine correct timeframe based on trade type ---
                                 ENUM_TIMEFRAMES divergenceTF = isScalp ?
@@ -3339,6 +3297,14 @@ void OnTick()
         ManageRetraceLimitOrders(); // Check retracement orders (uses main cancel TF internally)
         TouchUpManualInitial();   // Check manual trades
         ManageOpenPositions();    // Manage SL/TP/Trailing for ALL open positions
+        CleanupPartialClosedTickets();
+        // Update the previous trend direction for the next bar
+                double st_line;
+                int    st_dir;
+                if(CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, st_line, st_dir))
+                {
+                    prevDir_ST = st_dir;
+                }
     }
 
     // --- Scalp Strategy Bar Check (TF_Scalp) ---
@@ -3672,7 +3638,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                     if (totalDistance > 0)
                     {
                         double progressPercent = (achievedDistance / totalDistance) * 100.0;
-                        if (progressPercent >= 95.0)
+                        if (progressPercent >= Cooldown_Min_TP_Percent)
                         {
                             activateCooldown = true;
                         }
