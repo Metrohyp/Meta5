@@ -64,8 +64,8 @@ input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit
 input bool    Use_HTF_Filter            = true;                    // enable HTF divergence filter
 
 // --- Settings for HTF Divergence Filter (Directional Mode 1) ---
-input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H4;    // Timeframe to check for directional divergence.
-input ENUM_TIMEFRAMES TF_Scalp_HTF_Divergence = PERIOD_H1; // HTF Divergence filter just for scalps
+input ENUM_TIMEFRAMES TF_HTF_Divergence = PERIOD_H1;    // Timeframe to check for directional divergence.
+input ENUM_TIMEFRAMES TF_Scalp_HTF_Divergence = PERIOD_M15; // HTF Divergence filter just for scalps
 
 // --- General Entry Filters ---
 input bool           Use_OverboughtOversold_Filter = true; // Block entries in extreme WPR zones.
@@ -2670,6 +2670,22 @@ if (htfDivergenceBias > 0) sellCond = false;
 if (Use_Breakout_Confirmation && !isMainReversalConditionMet) {
             if (buyCond) { breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_BUY, Required_Confirmation_Candles, TF_Trade); }
 else if (sellCond) { breakoutConfirmed = IsCleanBreakout(POSITION_TYPE_SELL, Required_Confirmation_Candles, TF_Trade); }
+    // --- USER'S NEW LOGIC: FAILED BREAKOUT ---
+        // Check if:
+        // 1. The breakout check just failed
+        // 2. The trend just "flipped" (from a reversal back to the main trend)
+        bool justFlippedFromReversal = (prevDir_ST != 0 && dirM15 != prevDir_ST);
+        
+        if (!breakoutConfirmed && justFlippedFromReversal)
+        {
+            // This is a "failed to reverse" signal. The main trend is continuing.
+            // Force the breakout to "true" to allow the trade
+            breakoutConfirmed = true;
+            // Update the comment
+            if (buyCond) commentSuffix = " Main FB Entry";
+            if (sellCond) commentSuffix = " Main FB Entry";
+        }
+        // --- END OF NEW LOGIC ---
 } else {
             breakoutConfirmed = true; // Not required, so it's "confirmed"
         }
