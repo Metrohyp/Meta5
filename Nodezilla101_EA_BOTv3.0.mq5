@@ -757,16 +757,24 @@ bool CheckDivergenceForEntry(long tradeType, int lookbackBars, ENUM_TIMEFRAMES t
 // UPGRADED FUNCTION: Adds a limit order at a calculated SuperTrend retest point.
 void ManageRetraceLimitOrders()
 {
-    if (!Use_Retrace_Limit_Entry || CountPendingThisEA() != 1)
+    if (!Use_Retrace_Limit_Entry) return;
+
+    int stopOrders = CountPendingThisEA(); // Counts main STOP orders
+    int limitOrders = CountPendingLimitOrdersThisEA(); // Counts main LIMIT orders
+
+    // FIX: Only run if we have more stop orders than limit orders
+    if (stopOrders <= limitOrders)
     {
-        return;
+        return; // We have a limit for every stop, or no stops.
     }
     
+    // --- FIX: Find the NEWEST pending STOP order ---
     ulong  stop_order_ticket = 0;
     long   stop_order_type = 0;
     double stop_order_sl = 0;
     double stop_order_tp = 0;
-    
+    datetime newest_time = 0;
+
     for (int i = 0; i < OrdersTotal(); i++)
     {
         if (OrderSelect(OrderGetTicket(i)))
@@ -774,15 +782,24 @@ void ManageRetraceLimitOrders()
             long orderMagic = OrderGetInteger(ORDER_MAGIC);
             if ((orderMagic == Magic_Main || orderMagic == Magic_Main_Rev) && OrderGetString(ORDER_SYMBOL) == _Symbol)
             {
-                stop_order_ticket = OrderGetTicket(i);
-                stop_order_type = OrderGetInteger(ORDER_TYPE);
-                stop_order_sl = OrderGetDouble(ORDER_SL);
-                stop_order_tp = OrderGetDouble(ORDER_TP);
-                break;
+                long type = OrderGetInteger(ORDER_TYPE);
+                // Only look at STOP orders
+                if (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_SELL_STOP)
+                {
+                    datetime place_time = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+                    if (place_time > newest_time)
+                    {
+                        newest_time = place_time;
+                        stop_order_ticket = OrderGetTicket(i);
+                        stop_order_type = type;
+                        stop_order_sl = OrderGetDouble(ORDER_SL);
+                        stop_order_tp = OrderGetDouble(ORDER_TP);
+                    }
+                }
             }
         }
     }
-    
+    // --- End of FIX ---
     if (stop_order_ticket == 0 || stop_order_sl <= 0 || stop_order_tp <= 0) return;
     
     double limit_price = 0;
@@ -2012,7 +2029,8 @@ int CountPendingThisEA()
         
         if((string)OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
         long magic = (long)OrderGetInteger(ORDER_MAGIC);
-        if(magic != Magic_Main && magic != Magic_Main_Rev && magic != Magic_Scalp && magic != Magic_Scalp_Rev) continue;
+        // Only count MAIN strategy orders
+                if(magic != Magic_Main && magic != Magic_Main_Rev) continue;
         
         long t = (long)OrderGetInteger(ORDER_TYPE);
         if(t==ORDER_TYPE_BUY_STOP || t==ORDER_TYPE_SELL_STOP) c++;
@@ -2020,6 +2038,26 @@ int CountPendingThisEA()
     return c;
 }
 
+// Count pending LIMIT orders from this EA for this symbol
+int CountPendingLimitOrdersThisEA()
+{
+    int c=0;
+    for(int i=0;i<OrdersTotal();++i)
+    {
+        ulong ticket = OrderGetTicket(i);
+        if(ticket==0) continue;
+        if(!OrderSelect(ticket)) continue;
+        
+        if((string)OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+        long magic = (long)OrderGetInteger(ORDER_MAGIC);
+        // Only count MAIN strategy orders
+        if(magic != Magic_Main && magic != Magic_Main_Rev) continue;
+        
+        long t = (long)OrderGetInteger(ORDER_TYPE);
+        if(t==ORDER_TYPE_BUY_LIMIT || t==ORDER_TYPE_SELL_LIMIT) c++;
+    }
+    return c;
+}
 //============================== Indicator & Price Analysis Helpers =========================
 
 
@@ -3291,7 +3329,7 @@ void ManageOpenPositions()
         // --- end Manual HALF-STEP trailing ---
         
         // --- Half-step trailing (main positions only)
-        if(Use_HalfStep_Trailing)
+        if(Use_HalfStep_Trailing && !g_trailingActivated)
         {
             // run at most once per bar if requested
             static datetime lastHalfBar = 0;
@@ -3343,7 +3381,7 @@ void ManageOpenPositions()
         }
         
         // ATR trailing
-        if(Use_ATR_Trailing)
+        if(Use_ATR_Trailing && !g_trailingActivated)
         {
             int hATR = iATR(_Symbol, TF_Trade, ATR_Period_Trail);
             if(hATR!=INVALID_HANDLE)
