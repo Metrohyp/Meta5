@@ -240,8 +240,10 @@ input double         Scalp_Gate_ATR_Margin = 0.20;
 input double         Scalp_Risk_Mult    = 2.0;
 
 // --- System & Housekeeping ---
-input long           Magic            = 250925;
-input long           Magic_Reversal   = 250926; // Magic number for Reversal/Divergence trades
+input long           Magic_Main       = 250925; // Magic for Main strategy
+input long           Magic_Main_Rev   = 250926; // Magic for Main Reversal trades
+input long           Magic_Scalp      = 250927; // Magic for Scalp strategy
+input long           Magic_Scalp_Rev  = 250928; // Magic for Scalp Reversal trades
 input int            Cooldown_Bars    = 2;
 input int            Slippage_Points  = 50;
 input bool           Send_Closed_Trade_Alerts = true;
@@ -762,7 +764,8 @@ void ManageRetraceLimitOrders()
     {
         if (OrderSelect(OrderGetTicket(i)))
         {
-            if (OrderGetInteger(ORDER_MAGIC) == Magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+            long orderMagic = OrderGetInteger(ORDER_MAGIC);
+            if ((orderMagic == Magic_Main || orderMagic == Magic_Main_Rev) && OrderGetString(ORDER_SYMBOL) == _Symbol)
             {
                 stop_order_ticket = OrderGetTicket(i);
                 stop_order_type = OrderGetInteger(ORDER_TYPE);
@@ -914,7 +917,7 @@ void ManageRetraceMarketEntry()
 
     // --- 11. Send Trade ---
     string comment = isBuy ? "V25 Buy Retrace Market" : "V25 Sell Retrace Market";
-    Trade.SetExpertMagicNumber(Magic); // Use main magic number
+    Trade.SetExpertMagicNumber(Magic_Main);
     bool orderSent = false;
     
     if(isBuy)
@@ -994,11 +997,14 @@ void ManagePendingOrders()
         ulong ticket = OrderGetTicket(i);
         if (OrderSelect(ticket))
         {
-            if (OrderGetInteger(ORDER_MAGIC) == Magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+            long orderMagic = OrderGetInteger(ORDER_MAGIC);
+            if (OrderGetString(ORDER_SYMBOL) == _Symbol &&
+                (orderMagic == Magic_Main || orderMagic == Magic_Main_Rev ||
+                 orderMagic == Magic_Scalp || orderMagic == Magic_Scalp_Rev))
             {
                 long   orderType = OrderGetInteger(ORDER_TYPE);
-                string comment   = OrderGetString(ORDER_COMMENT);
-                bool   isScalp   = (StringFind(comment, "Scalp", 0) >= 0);
+                //string comment   = OrderGetString(ORDER_COMMENT); // No longer needed
+                bool   isScalp   = (orderMagic == Magic_Scalp || orderMagic == Magic_Scalp_Rev);
                 
                 int relevantST_dir = isScalp ? st_scalp_dir : st_main_dir;
                 ENUM_TIMEFRAMES relevant_TF = isScalp ? TF_Scalp_Cancel_Gate : TF_Main_Cancel_Gate;
@@ -1698,13 +1704,13 @@ void CloseOpenTrendPositions(long currentTradeType)
         long posType = PositionGetInteger(POSITION_TYPE);
 
         // Check if it's a TREND trade (main magic) and OPPOSITE to the upcoming reversal
-        if(magic == Magic && posType != currentTradeType)
+        if(magic == Magic_Main && posType != currentTradeType)
         {
             Trade.PositionClose(ticket, 10);
             if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
             {
                 string posDir = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
-                SendTG(StringFormat("⚠️ Closed Trend %s Trade (Magic %d) in anticipation of Scalp Reversal.", posDir, Magic));
+                SendTG(StringFormat("⚠️ Closed Trend %s Trade (Magic %d) in anticipation of Scalp Reversal.", posDir, Magic_Main));
             }
         }
     }
@@ -1723,7 +1729,7 @@ bool GetLatestOpenPos(int dir, bool includeManual, ulong &ticketOut, double &ent
         int d=(typ==POSITION_TYPE_BUY)?+1:-1;
         if(d!=dir) continue;
         long mg=PositionGetInteger(POSITION_MAGIC);
-        if(!(mg==Magic || mg==Magic_Reversal || (includeManual && mg==0))) continue;
+        if(!(mg==Magic_Main || mg==Magic_Main_Rev || mg==Magic_Scalp || mg==Magic_Scalp_Rev || (includeManual && mg==0))) continue;
         datetime t=(datetime)PositionGetInteger(POSITION_TIME);
         if(t>newest){ newest=t; found=true; ticketOut=tk;
             entryOut=PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1904,7 +1910,26 @@ int CountOpen()
         ulong ticket = PositionGetTicket(p);
         if(PositionSelectByTicket(ticket))
         {
-            if((PositionGetInteger(POSITION_MAGIC)==Magic || PositionGetInteger(POSITION_MAGIC)==Magic_Reversal) && (string)PositionGetString(POSITION_SYMBOL)==_Symbol)
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            if((magic==Magic_Main || magic==Magic_Main_Rev || magic==Magic_Scalp || magic==Magic_Scalp_Rev) && (string)PositionGetString(POSITION_SYMBOL)==_Symbol)
+                cnt++;
+        }
+    }
+    return cnt;
+}
+
+// Count open SCALP positions by this EA for current symbol
+int CountOpenScalp()
+{
+    int total = PositionsTotal();
+    int cnt=0;
+    for(int p=0; p<total; ++p)
+    {
+        ulong ticket = PositionGetTicket(p);
+        if(PositionSelectByTicket(ticket))
+        {
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            if((magic==Magic_Scalp || magic==Magic_Scalp_Rev) && (string)PositionGetString(POSITION_SYMBOL)==_Symbol)
                 cnt++;
         }
     }
@@ -1919,7 +1944,8 @@ int CountOpenByCommentSubstr(const string key)
         ulong tk=PositionGetTicket(i);
         if(!PositionSelectByTicket(tk)) continue;
         if((string)PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-        if((long)PositionGetInteger(POSITION_MAGIC)!=Magic && (long)PositionGetInteger(POSITION_MAGIC)!=Magic_Reversal) continue;
+        long magic = (long)PositionGetInteger(POSITION_MAGIC);
+        if(magic!=Magic_Main && magic!=Magic_Main_Rev && magic!=Magic_Scalp && magic!=Magic_Scalp_Rev) continue;
         string cmt=(string)PositionGetString(POSITION_COMMENT);
         if(StringFind(cmt,key,0)>=0) cnt++;
     }
@@ -1937,7 +1963,8 @@ int CountPendingThisEA()
         if(!OrderSelect(ticket)) continue;
         
         if((string)OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
-        if((long)OrderGetInteger(ORDER_MAGIC) != Magic && (long)OrderGetInteger(ORDER_MAGIC) != Magic_Reversal) continue;
+        long magic = (long)OrderGetInteger(ORDER_MAGIC);
+        if(magic != Magic_Main && magic != Magic_Main_Rev && magic != Magic_Scalp && magic != Magic_Scalp_Rev) continue;
         
         long t = (long)OrderGetInteger(ORDER_TYPE);
         if(t==ORDER_TYPE_BUY_STOP || t==ORDER_TYPE_SELL_STOP) c++;
@@ -1965,7 +1992,7 @@ void TryScalpEntries()
     if(!Use_Scalp_Mode) return;
     if (!IsTradeTime()) { return; }
     if(Scalp_Only_When_No_Main && CountOpen()>0) return;
-    if(CountOpenByCommentSubstr("V25 Scalp") >= Scalp_Max_Concurrent) return;
+    if(CountOpenScalp() >= Scalp_Max_Concurrent) return;
 
     // --- Check Momentum Cooldown Status ---
     bool isCooldownActive = false;
@@ -2014,7 +2041,7 @@ void TryScalpEntries()
     // ======================= STEP 1: GENERATE ENTRY SIGNALS based on Entry_Mode =======================
     bool buySignal = false;
     bool sellSignal = false;
-    long magicToUse = Magic;
+    long magicToUse = Magic_Scalp;
     string commentSuffix = "";
     bool isScalpReversalConditionMet = false;
 
@@ -2035,7 +2062,7 @@ void TryScalpEntries()
         if (wprBuyTriggerOK && buyMomentumConfirmOK)
         {
             buySignal = true;
-            magicToUse = Magic_Reversal;
+            magicToUse = Magic_Scalp_Rev;
             commentSuffix = " Scalp Reversal";
             isScalpReversalConditionMet = true;
             CloseOpenTrendPositions(POSITION_TYPE_BUY);
@@ -2043,7 +2070,7 @@ void TryScalpEntries()
         else if (wprSellTriggerOK && sellMomentumConfirmOK)
         {
             sellSignal = true;
-            magicToUse = Magic_Reversal;
+            magicToUse = Magic_Scalp_Rev;
             commentSuffix = " Scalp Reversal";
             isScalpReversalConditionMet = true;
             CloseOpenTrendPositions(POSITION_TYPE_SELL);
@@ -2183,7 +2210,8 @@ void TryScalpEntries()
     bool tpOk = false;
     for(int i = PositionsTotal() - 1; i >= 0; i--) {
         if(PositionSelectByTicket(PositionGetTicket(i))) {
-            if(PositionGetInteger(POSITION_MAGIC) == Magic && StringFind(PositionGetString(POSITION_COMMENT), "Scalp", 0) < 0) {
+            long posMagic = PositionGetInteger(POSITION_MAGIC);
+            if(posMagic == Magic_Main || posMagic == Magic_Main_Rev) {
                  tp = PositionGetDouble(POSITION_TP);
                  if(tp > 0) { tpOk = true; break; }
             }
@@ -2435,7 +2463,7 @@ bool hOK = (!Use_H1H4_Filter) || (dirH1==dirM15 && dirH4==dirM15);
         // --- GENERATE ENTRY SIGNALS based on Entry_Mode ---
         bool buySignal = false;
 bool sellSignal = false;
-        long magicToUse = Magic;
+        long magicToUse = Magic_Main;
         string commentSuffix = "";
         bool isMainReversalConditionMet = false;
 if (currentEntryMode == 1 || currentEntryMode == 2)
@@ -2449,10 +2477,10 @@ bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_
 bool buyMomentumConfirmOK = (momH1 < 100.0 && (100.0 - momH1) >= Mom_Min_Strength) && (momH4 < 100.0 && (100.0 - momH4) >= Mom_Min_Strength);
 bool sellMomentumConfirmOK = (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Min_Strength) && (momH4 > 100.0 && (momH4 - 100.0) >= Mom_Min_Strength);
 if (wprBuyTriggerOK && buyMomentumConfirmOK) {
-                buySignal = true; magicToUse = Magic_Reversal; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
+    buySignal = true; magicToUse = Magic_Main_Rev; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
 }
             else if (wprSellTriggerOK && sellMomentumConfirmOK) {
-                sellSignal = true; magicToUse = Magic_Reversal; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
+                sellSignal = true; magicToUse = Magic_Main_Rev; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
 }
         }
         if (!buySignal && !sellSignal)
@@ -2751,7 +2779,7 @@ void ManageOpenPositions()
         
         long magic = PositionGetInteger(POSITION_MAGIC);
         
-        bool isEA      = (magic==Magic || magic==Magic_Reversal);
+        bool isEA      = (magic==Magic_Main || magic==Magic_Main_Rev || magic==Magic_Scalp || magic==Magic_Scalp_Rev);
         
         bool isManual  = (magic==0);
         
@@ -2773,7 +2801,7 @@ void ManageOpenPositions()
         
         string pcomment = (string)PositionGetString(POSITION_COMMENT);
         
-        bool   isScalp  = (StringFind(pcomment,"Scalp",0) >= 0);
+        bool   isScalp  = (magic==Magic_Scalp || magic==Magic_Scalp_Rev);
         
         // ======================= ADD THIS LINE BACK =======================
         int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1;
@@ -3363,7 +3391,7 @@ void SendPeriodReport(datetime fromTs, datetime toTs, const string label)
         if(sym != _Symbol) continue;
         
         long mg = (long)HistoryDealGetInteger(d, DEAL_MAGIC);
-        if(mg != Magic) continue;
+        if(mg != Magic_Main && mg != Magic_Main_Rev && mg != Magic_Scalp && mg != Magic_Scalp_Rev) continue;
         
         double P = HistoryDealGetDouble(d, DEAL_PROFIT);
         double F = HistoryDealGetDouble(d, DEAL_FEE);
@@ -3371,8 +3399,8 @@ void SendPeriodReport(datetime fromTs, datetime toTs, const string label)
         double S = HistoryDealGetDouble(d, DEAL_SWAP);
         double net = P + F + C + S;
         
-        string cmt = (string)HistoryDealGetString(d, DEAL_COMMENT);
-        bool   isScalp = (StringFind(cmt,"Scalp",0)>=0);
+        // string cmt = (string)HistoryDealGetString(d, DEAL_COMMENT); // No longer needed
+        bool   isScalp = (mg == Magic_Scalp || mg == Magic_Scalp_Rev);
         
         if(isScalp){
             scalpN++;
@@ -3516,7 +3544,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         if(sym != _Symbol) return;
         
         long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
-        if(mg != Magic && mg != Magic_Reversal) return; // Only this EA's trades
+        if(mg != Magic_Main && mg != Magic_Main_Rev && mg != Magic_Scalp && mg != Magic_Scalp_Rev) return; // Only this EA's trades
 
         // --- A) POSITION WAS OPENED (DEAL_ENTRY_IN) ---
         if(entryType == DEAL_ENTRY_IN)
@@ -3527,7 +3555,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             double entry   = HistoryDealGetDouble(deal, DEAL_PRICE);
             double lots    = HistoryDealGetDouble(deal, DEAL_VOLUME);
             string cmt     = (string)HistoryDealGetString(deal, DEAL_COMMENT);
-            bool   isScalp = (StringFind(cmt,"Scalp",0) >= 0);
+            bool   isScalp = (mg == Magic_Scalp || mg == Magic_Scalp_Rev);
             string strat   = isScalp ? "Scalp Strategy" : "Main Strategy";
 
             double sl=0.0, tp=0.0;
@@ -3700,7 +3728,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
     else if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
     {
         // --- We must check the REQUEST magic, not the transaction magic ---
-        if(req.magic == Magic || req.magic == Magic_Reversal)
+        if(req.magic == Magic_Main || req.magic == Magic_Main_Rev || req.magic == Magic_Scalp || req.magic == Magic_Scalp_Rev)
         {
             if(trans.order_type == ORDER_TYPE_BUY_LIMIT || trans.order_type == ORDER_TYPE_SELL_LIMIT)
             {
