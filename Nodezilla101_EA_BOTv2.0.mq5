@@ -45,16 +45,16 @@ input double         Risk_Percent_Scalp = 5;      // if >0, overrides and uses t
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;// Require a breakout on a higher timeframe.
 input int            HTF_Filter_Mode = 0;              // 0=Trend Align, 1=Breakout, 2=BOTH (Trend AND Breakout)
-input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;    // Timeframe for the filter.
+input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H1;    // Timeframe for the filter.
 
 input bool           Scalp_Gate_By_HTF  = true;     // Require scalp trades to align with HTF breakout.
-input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_H1; // scalp alignment filter Timeframe.
+input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_M15; // scalp alignment filter Timeframe.
 
 input bool           Cancel_Pending_On_Flip = true; // Cancel pending orders if SuperTrend flips.
-input bool           Use_Pending_Stop_Entries = true;
+input bool           Use_Pending_Stop_Entries = false;
 input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_M15; // Main trade pending orders Timeframe to watch.
 
-input bool           Scalp_Use_Pending_Stop_Entries = true;
+input bool           Scalp_Use_Pending_Stop_Entries = false;
 input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5;  // Scalp trade pending orders Timeframe to watch.
 
 // --- NEW: Retracement Limit Entry Settings ---
@@ -112,7 +112,7 @@ input double         CircuitBreaker_ATR_Mult = 6.5;    // Closes all if a candle
 input double         RR_Min           = 2.0;      // MINIMUM R:R for main trades.
 input double         RR_Max           = 10.0;     // MAXIMUM R:R for main trades.
 input double         Scalp_RR_Min     = 2.0;      // MINIMUM R:R for scalp trades.
-input double         Scalp_RR_Max     = 10.0;     // MAXIMUM R:R for scalp trades.
+input double         Scalp_RR_Max     = 5.0;     // MAXIMUM R:R for scalp trades.
 input double         TP_Pullback_ATR_Mult = 0.5; // NEW: Pulls TP back by this ATR multiple. Set to 0 to disable.
 
 
@@ -157,7 +157,9 @@ input int            Trade_End_Min     = 0;      // End minute (e.g., 0)
 input bool Use_Alligator_Filter = true; // Use Alligator state for confirmation
 input bool Use_AO_Filter = false;        // Use Awesome Oscillator strength for confirmation
 input bool           Use_Momentum_Filter = true;   // true = require Momentum confirmation
-input bool Use_Stochastic_Filter = true;        // Use Stochastic Oscillator 20/80 cross for confirmation
+input bool Use_Momentum_Reversal_Filter = true; // Use Momentum Reversal (Exhaustion) Zones
+input bool Use_WPR_Filter        = true; //Use WPR for signals & filters
+input bool Use_Stochastic_Filter = false;        // Use Stochastic Oscillator 20/80 cross for confirmation
 
 // --- NEW: Stochastic Filter ---
 input int  Stoch_K_Period        = 14;        // %K Length
@@ -180,7 +182,8 @@ input double         AO_Min_Strength  = 3.0;
 input double         AO_Scalp_Min_Strength = 3;
 input int            Momentum_Period     = 14;   // Period for the Momentum indicator
 input double         Mom_Min_Strength    = 0.5;  // Required strength (distance from 100)
-input double         Mom_Scalp_Min_Strength = 0.3; // Required strength for scalps
+input double         Mom_Scalp_Min_Strength = 0.5; // Required strength for scalps
+input int            Mom_StdDev_Period = 20; // Lookback for Momentum Volatility (StdDev)
 
 input bool           Use_WPR_Bias     = true;
 input bool           Use_WPR_Cross    = false;
@@ -1369,6 +1372,45 @@ double WPRValue(ENUM_TIMEFRAMES tf, int shift=1)
     return v;
 }
 
+// NEW HELPER: Calculates dynamic momentum volatility threshold
+double GetDynamicMomentumBias(ENUM_TIMEFRAMES tf, double multiplier, int stdDevPeriod)
+{
+    if (stdDevPeriod <= 1) return 0.0; // Invalid lookback
+
+    int hMom = iMomentum(_Symbol, tf, Momentum_Period, PRICE_CLOSE);
+    if(hMom == INVALID_HANDLE) return 0.0;
+
+    double mom_buffer[];
+    // We need the array in standard (non-series) order
+    // index 0 = oldest, index N-1 = newest
+    ArraySetAsSeries(mom_buffer, false);
+
+    // Copy the last 'stdDevPeriod' values from *closed bars* (shift 1)
+    if(CopyBuffer(hMom, 0, 1, stdDevPeriod, mom_buffer) < stdDevPeriod)
+    {
+        IndicatorRelease(hMom);
+        return 0.0; // Not enough data
+    }
+
+    IndicatorRelease(hMom);
+
+    // Calculate the standard deviation of the momentum values manually
+    double sum = 0.0;
+    for(int i = 0; i < stdDevPeriod; i++)
+        sum += mom_buffer[i];
+    
+    double mean = sum / stdDevPeriod;
+    
+    double variance = 0.0;
+    for(int i = 0; i < stdDevPeriod; i++)
+        variance += MathPow(mom_buffer[i] - mean, 2);
+    
+    double momentumStdDev = MathSqrt(variance / stdDevPeriod);
+
+    // Return the dynamic bias (StdDev * Multiplier)
+    return momentumStdDev * multiplier;
+}
+
 // SuperTrend calc (dir: +1 up, -1 down). Returns line at 'shift'.
 bool CalcSuperTrend(ENUM_TIMEFRAMES tf, int atrPeriod, double mult, int shift, double &stLine, int &dir)
 {
@@ -1692,6 +1734,7 @@ void ApplySLTPToAllOpen(int dir, double newSL, double newTP)
 }
 
 // --- NEW HELPER: Closes open TREND positions (Magic) on the current symbol ---
+
 void CloseOpenTrendPositions(long currentTradeType)
 {
     for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2048,35 +2091,57 @@ void TryScalpEntries()
     // --- Priority 1.5: Check for STRICT WPR + Momentum Reversal First ---
     if (currentEntryMode == 1 || currentEntryMode == 2)
     {
-        double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1);
-        double wprM15  = WPRValue(TF_Scalp, 1);
-        double momM15 = MomentumValue(TF_Scalp, 1);       // Use the 'mom' variable already calculated earlier
-        double momH1  = MomentumValue(TF_Scalp_Gate_HTF, 1); // *** ADD THIS LINE ***
-        bool wprBuyTriggerOK  = (wprM15 < WPR_Oversold_Level) && (wprH1 < WPR_Oversold_Level); // Both M15 and H1 must be Oversold
-        bool wprSellTriggerOK = (wprM15 > WPR_Overbought_Level) && (wprH1 > WPR_Overbought_Level); // Both M15 and H1 must be Overbought
-        bool buyMomentumConfirmOK = (momM15 < 100.0 && (100.0 - momM15) >= Mom_Scalp_Min_Strength) &&
-                                        (momH1 < 100.0 && (100.0 - momH1) >= Mom_Scalp_Min_Strength); // Check H1 Mom too
-            bool sellMomentumConfirmOK = (momM15 > 100.0 && (momM15 - 100.0) >= Mom_Scalp_Min_Strength) &&
-                                         (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Scalp_Min_Strength); // Check H1 Mom too
+        // --- WPR + Momentum Reversal Logic ---
+        if (Use_Momentum_Filter) // Momentum is the core requirement
+        {
+            double wprH1   = WPRValue(TF_Scalp_Gate_HTF, 1);
+            double wprM15  = WPRValue(TF_Scalp, 1);
+            double momM15 = MomentumValue(TF_Scalp, 1);
+            double momH1  = MomentumValue(TF_Scalp_Gate_HTF, 1);
 
-        if (wprBuyTriggerOK && buyMomentumConfirmOK)
-        {
-            buySignal = true;
-            magicToUse = Magic_Scalp_Rev;
-            commentSuffix = " Scalp Reversal";
-            isScalpReversalConditionMet = true;
-            CloseOpenTrendPositions(POSITION_TYPE_BUY);
-        }
-        else if (wprSellTriggerOK && sellMomentumConfirmOK)
-        {
-            sellSignal = true;
-            magicToUse = Magic_Scalp_Rev;
-            commentSuffix = " Scalp Reversal";
-            isScalpReversalConditionMet = true;
-            CloseOpenTrendPositions(POSITION_TYPE_SELL);
+            // Check WPR only if the new switch is ON
+            bool wprBuyTriggerOK  = !Use_WPR_Filter || (wprM15 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
+            bool wprSellTriggerOK = !Use_WPR_Filter || (wprM15 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
+
+            // --- NEW: DYNAMIC MOMENTUM REVERSAL (EXHAUSTION) LOGIC ---
+            bool buyMomentumConfirmOK  = false;
+            bool sellMomentumConfirmOK = false;
+
+            if (Use_Momentum_Reversal_Filter)
+            {
+                // Calculate dynamic bias for both timeframes
+                double biasM15 = GetDynamicMomentumBias(TF_Scalp, Mom_Scalp_Min_Strength, Mom_StdDev_Period);
+                double biasH1  = GetDynamicMomentumBias(TF_Scalp_Gate_HTF, Mom_Scalp_Min_Strength, Mom_StdDev_Period);
+                if (biasM15 <= 0) biasM15 = Mom_Scalp_Min_Strength; // Fallback
+                if (biasH1 <= 0)  biasH1  = Mom_Scalp_Min_Strength; // Fallback
+
+                // Potential Reversal (Oversold) - Look for BUY
+                bool buyM15_OK = (momM15 > (100.0 - biasM15)) && (momM15 < (100.0 - biasM15 / 2.0));
+                bool buyH1_OK  = (momH1  > (100.0 - biasH1))  && (momH1  < (100.0 - biasH1  / 2.0));
+                buyMomentumConfirmOK = buyM15_OK && buyH1_OK;
+
+                // Potential Reversal (Overbought) - Look for SELL
+                bool sellM15_OK = (momM15 < (100.0 + biasM15)) && (momM15 > (100.0 + biasM15 / 2.0));
+                bool sellH1_OK  = (momH1  < (100.0 + biasH1))  && (momH1  > (100.0 + biasH1  / 2.0));
+                sellMomentumConfirmOK = sellM15_OK && sellH1_OK;
+            }
+            else // Use the "old" (simple) reversal logic
+            {
+                buyMomentumConfirmOK = (momM15 < 100.0) && (momH1 < 100.0);
+                sellMomentumConfirmOK = (momM15 > 100.0) && (momH1 > 100.0);
+            }
+            // --- END OF NEW LOGIC ---
+
+            if (buyMomentumConfirmOK && wprBuyTriggerOK) { // Logic: (Momentum AND WPR_if_Enabled)
+                buySignal = true; magicToUse = Magic_Scalp_Rev; commentSuffix = " Scalp Reversal"; isScalpReversalConditionMet = true;
+                CloseOpenTrendPositions(POSITION_TYPE_BUY);
+            }
+            else if (sellMomentumConfirmOK && wprSellTriggerOK) { // Logic: (Momentum AND WPR_if_Enabled)
+                sellSignal = true; magicToUse = Magic_Scalp_Rev; commentSuffix = " Scalp Reversal"; isScalpReversalConditionMet = true;
+                CloseOpenTrendPositions(POSITION_TYPE_SELL);
+            }
         }
     }
-
     // --- Priority 1 (Trend) & Priority 2 (Standard Divergence - if Magic_Reversal not triggered) ---
     if (!buySignal && !sellSignal)
     {
@@ -2126,8 +2191,12 @@ void TryScalpEntries()
                                (stochOK1 && stochOK2 && stoch_k1 < 80.0 && stoch_k2 >= 80.0);
 
             // --- Other Filters ---
-            bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Scalp_Min_Strength);
-            bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Scalp_Min_Strength);
+            // --- Dynamic Momentum Filter ---
+            double dynamicScalpMomBias = GetDynamicMomentumBias(TF_Scalp, Mom_Scalp_Min_Strength, Mom_StdDev_Period);
+            if (dynamicScalpMomBias <= 0) dynamicScalpMomBias = Mom_Scalp_Min_Strength; // Fallback to fixed value
+
+            bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= dynamicScalpMomBias);
+            bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= dynamicScalpMomBias);
             bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
             bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
 
@@ -2466,22 +2535,58 @@ bool sellSignal = false;
         long magicToUse = Magic_Main;
         string commentSuffix = "";
         bool isMainReversalConditionMet = false;
-if (currentEntryMode == 1 || currentEntryMode == 2)
+        if (currentEntryMode == 1 || currentEntryMode == 2)
         {
-            double wprH4 = WPRValue(TF_HTF_Breakout, 1);
-double wprH1 = WPRValue(TF_Trade, 1);
-            double momH1 = MomentumValue(TF_Trade, 1);
-            double momH4 = MomentumValue(TF_HTF_Breakout, 1);
-bool wprBuyTriggerOK  = (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
-bool wprSellTriggerOK = (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
-bool buyMomentumConfirmOK = (momH1 < 100.0 && (100.0 - momH1) >= Mom_Min_Strength) && (momH4 < 100.0 && (100.0 - momH4) >= Mom_Min_Strength);
-bool sellMomentumConfirmOK = (momH1 > 100.0 && (momH1 - 100.0) >= Mom_Min_Strength) && (momH4 > 100.0 && (momH4 - 100.0) >= Mom_Min_Strength);
-if (wprBuyTriggerOK && buyMomentumConfirmOK) {
-    buySignal = true; magicToUse = Magic_Main_Rev; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
-}
-            else if (wprSellTriggerOK && sellMomentumConfirmOK) {
-                sellSignal = true; magicToUse = Magic_Main_Rev; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
-}
+            // --- WPR + Momentum Reversal Logic ---
+            if (Use_Momentum_Filter) // Momentum is the core requirement
+            {
+                double wprH4 = WPRValue(TF_HTF_Breakout, 1);
+                double wprH1 = WPRValue(TF_Trade, 1);
+                double momH1 = MomentumValue(TF_Trade, 1);
+                double momH4 = MomentumValue(TF_HTF_Breakout, 1);
+
+                // Check WPR only if the new switch is ON
+                bool wprBuyTriggerOK  = !Use_WPR_Filter || (wprH4 < WPR_Oversold_Level && wprH1 < WPR_Oversold_Level);
+                bool wprSellTriggerOK = !Use_WPR_Filter || (wprH4 > WPR_Overbought_Level && wprH1 > WPR_Overbought_Level);
+                
+                // --- NEW: DYNAMIC MOMENTUM REVERSAL (EXHAUSTION) LOGIC ---
+                bool buyMomentumConfirmOK  = false;
+                bool sellMomentumConfirmOK = false;
+
+                if (Use_Momentum_Reversal_Filter)
+                {
+                    // Calculate dynamic bias for both timeframes
+                    double biasH1 = GetDynamicMomentumBias(TF_Trade, Mom_Min_Strength, Mom_StdDev_Period);
+                    double biasH4 = GetDynamicMomentumBias(TF_HTF_Breakout, Mom_Min_Strength, Mom_StdDev_Period);
+                    if (biasH1 <= 0) biasH1 = Mom_Min_Strength; // Fallback
+                    if (biasH4 <= 0) biasH4 = Mom_Min_Strength; // Fallback
+
+                    // Potential Reversal (Oversold) - Look for BUY
+                    // mom > (100 - bias) AND mom < (100 - bias/2)
+                    bool buyH1_OK = (momH1 > (100.0 - biasH1)) && (momH1 < (100.0 - biasH1 / 2.0));
+                    bool buyH4_OK = (momH4 > (100.0 - biasH4)) && (momH4 < (100.0 - biasH4 / 2.0));
+                    buyMomentumConfirmOK = buyH1_OK && buyH4_OK;
+
+                    // Potential Reversal (Overbought) - Look for SELL
+                    // mom < (100 + bias) AND mom > (100 + bias/2)
+                    bool sellH1_OK = (momH1 < (100.0 + biasH1)) && (momH1 > (100.0 + biasH1 / 2.0));
+                    bool sellH4_OK = (momH4 < (100.0 + biasH4)) && (momH4 > (100.0 + biasH4 / 2.0));
+                    sellMomentumConfirmOK = sellH1_OK && sellH4_OK;
+                }
+                else // Use the "old" (simple) reversal logic
+                {
+                    buyMomentumConfirmOK = (momH1 < 100.0) && (momH4 < 100.0);
+                    sellMomentumConfirmOK = (momH1 > 100.0) && (momH4 > 100.0);
+                }
+                // --- END OF NEW LOGIC ---
+
+                if (buyMomentumConfirmOK && wprBuyTriggerOK) { // Logic: (Momentum AND WPR_if_Enabled)
+                    buySignal = true; magicToUse = Magic_Main_Rev; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
+                }
+                else if (sellMomentumConfirmOK && wprSellTriggerOK) { // Logic: (Momentum AND WPR_if_Enabled)
+                    sellSignal = true; magicToUse = Magic_Main_Rev; commentSuffix = " Main Reversal"; isMainReversalConditionMet = true;
+                }
+            }
         }
         if (!buySignal && !sellSignal)
         {
@@ -2497,9 +2602,9 @@ else if (CheckDivergenceForEntry(POSITION_TYPE_SELL, Divergence_Lookback_Bars, T
         if (!buySignal && !sellSignal) return;
 
         // --- APPLY CONFIRMATION FILTERS ---
-        bool wBuyOK  = !Use_WPR_Bias || (w > -50.0);
+        bool wBuyOK  = !Use_WPR_Filter || !Use_WPR_Bias || (w > -50.0);
 bool wSellOK = !Use_WPR_Bias || (w < -50.0);
-if(Use_OverboughtOversold_Filter) {
+        if(Use_WPR_Filter && Use_OverboughtOversold_Filter) {
             if (w > WPR_Overbought_Level) wBuyOK = false;
 if (w < WPR_Oversold_Level) wSellOK = false;
         }
@@ -2515,12 +2620,15 @@ if (sellSignal) sellCond = true;
 bool stochOK2 = StochasticValues(TF_Trade, 2, stoch_k2, stoch_d2);
             bool stochBuyOK  = !Use_Stochastic_Filter || (stochOK1 && stochOK2 && stoch_k1 > 20.0 && stoch_k2 <= 20.0);
 bool stochSellOK = !Use_Stochastic_Filter || (stochOK1 && stochOK2 && stoch_k1 < 80.0 && stoch_k2 >= 80.0);
-bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= Mom_Min_Strength);
-bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= Mom_Min_Strength);
-bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
+            // --- Dynamic Momentum Filter ---
+            double dynamicMomBias = GetDynamicMomentumBias(TF_Trade, Mom_Min_Strength, Mom_StdDev_Period);
+            if (dynamicMomBias <= 0) dynamicMomBias = Mom_Min_Strength; // Fallback to fixed value if calc fails
+
+            bool momBuyOK  = !Use_Momentum_Filter || (mom > 100.0 && (mom - 100.0) >= dynamicMomBias);
+            bool momSellOK = !Use_Momentum_Filter || (mom < 100.0 && (100.0 - mom) >= dynamicMomBias);bool alligatorBuyOK  = !Use_Alligator_Filter || (ag > 0);
 bool alligatorSellOK = !Use_Alligator_Filter || (ag < 0);
-            if (buySignal && alligatorBuyOK && stochBuyOK && momBuyOK) buyCond = true;
-if (sellSignal && alligatorSellOK && stochSellOK && momSellOK) sellCond = true;
+            if (buySignal && alligatorBuyOK && stochBuyOK && momBuyOK && wBuyOK) buyCond = true;
+            if (sellSignal && alligatorSellOK && stochSellOK && momSellOK && wSellOK) sellCond = true;
 }
 
         // --- APPLY DIRECTIONAL FILTER ---
@@ -2683,7 +2791,7 @@ if(Require_Retrace_Or_Breakout) { double tolX = Retest_ATR_Tolerance * atr; bool
     if (!allowStage || stageCount >= Max_Entry_Stages) return;
 
     // --- 3. "Is Clean Breakout" Filter (Uses LOCKED status) ---
-    if (!isBreakoutConfirmed) return; // Block trade if the initial signal was not a clean breakout
+    if (!g_lockedIsClean) return; // Block trade if the initial signal was not a clean breakout
 
 
     // ======================= STEP 3: EXECUTE TRADE (All checks passed) =======================
@@ -2812,7 +2920,7 @@ void ManageOpenPositions()
                 // If the main trend flips, close ALL positions (main, scalp, manual).
                 // int requiredDir = (type == POSITION_TYPE_BUY) ? +1 : -1; // <-- KEEP THIS COMMENTED
                 
-        if (prevDir_ST != 0 && main_st_dir != prevDir_ST)                         // <-- UNCOMMENTED
+        if (prevDir_ST != 0 && main_st_dir != prevDir_ST && requiredDir != main_st_dir)                 // <-- UNCOMMENTED
                 {                                                        // <-- UNCOMMENTED
                     if (Trade.PositionClose(ticket))
                                    {
