@@ -2013,19 +2013,24 @@ int CountOpen()
 // Count open SCALP positions by this EA for current symbol
 int CountOpenScalp()
 {
-    int total = PositionsTotal();
-    int cnt=0;
-    for(int p=0; p<total; ++p)
+    int count = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
-        ulong ticket = PositionGetTicket(p);
-        if(PositionSelectByTicket(ticket))
+        if(PositionSelectByTicket(PositionGetTicket(i)))
         {
+            // Check if symbol matches
+            if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+                continue;
+
+            // Check if it's a scalp magic number
             long magic = PositionGetInteger(POSITION_MAGIC);
-            if((magic==Magic_Scalp || magic==Magic_Scalp_Rev) && (string)PositionGetString(POSITION_SYMBOL)==_Symbol)
-                cnt++;
+            if(magic == Magic_Scalp || magic == Magic_Scalp_Rev)
+            {
+                count++;
+            }
         }
     }
-    return cnt;
+    return count;
 }
 
 // Count open positions by comment substring (same Magic & Symbol)
@@ -2110,7 +2115,7 @@ void TryScalpEntries()
     if(Scalp_Only_When_No_Main && CountOpen()>0) return;
     
     // Limit concurrent scalp positions (by comment tag)
-    if(CountOpenByCommentSubstr("V25 Scalp") >= Scalp_Max_Concurrent) return;
+    if(CountOpenScalp() >= Scalp_Max_Concurrent) return;
     
     // Risk % source for non-fixed lots
     double rp = (Risk_Percent_Scalp > 0.0 ? Risk_Percent_Scalp
@@ -2388,7 +2393,14 @@ void TryEntries()
     if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
         return; // enforce N-bar cooldown after a fill
     // ======================================================================
-    
+    // <<< --- ADD THIS NEW BLOCK --- >>>
+    // Check max position guard (uses stageCount reset by ST flip)
+    if(stageCount >= Max_Entry_Stages)
+    {
+        // Print("Main entry blocked by Max_Entry_Stages");
+        return;
+    }
+    // <<< --- END NEW BLOCK --- >>>
     // Cooldown after last trade bar (legacy guard)
     if(lastTradeBarTime == barTime) return;
     
