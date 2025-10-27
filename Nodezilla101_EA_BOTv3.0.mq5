@@ -23,7 +23,7 @@ input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place
 //---- Telegram
 input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
 input string          TG_CHAT_ID           = "394044850";
-input long            TG_THREAD_ID         = 0; 
+input long            TG_THREAD_ID         = 0;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Master Strategy Selection ---
@@ -2033,6 +2033,28 @@ int CountOpenScalp()
     return count;
 }
 
+int CountOpenMain()
+{
+    int count = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionSelectByTicket(PositionGetTicket(i)))
+        {
+            // Check if symbol matches
+            if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+                continue;
+
+            // Check if it's a MAIN trade magic number
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            if(magic == Magic_Main || magic == Magic_Main_Rev)
+            {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
 // Count open positions by comment substring (same Magic & Symbol)
 int CountOpenByCommentSubstr(const string key)
 {
@@ -2540,12 +2562,8 @@ void TryEntries()
     // ======================================================================
     
     // One position at a time (per symbol/magic)
-    if(One_Trade_At_A_Time && CountOpen()>0)
+    if(One_Trade_At_A_Time && CountOpenMain()>0)
     {
-        // --- NOTE: This block was sending a TG message on every bar
-        // --- which can be spammy. I am commenting out the SendTG call.
-        // --- Remove the "//" if you want the "REJECTED" message.
-        /*
         string rejectMsg = StringFormat(
                                      "🚫 <b>TRADE REJECTED - Max Positions</b>\n\n"
                                      "⏰ <b>Timeframe:</b> %s\n"
@@ -2558,7 +2576,6 @@ void TryEntries()
                                      buyCond ? "BUY" : (sellCond ? "SELL" : "N/A")
                                      );
         SendTG(rejectMsg);
-        */
         return;
     }
     // =========================== BUILD SL / TP ============================
