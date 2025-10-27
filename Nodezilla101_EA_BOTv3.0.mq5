@@ -23,7 +23,7 @@ input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place
 //---- Telegram
 input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
 input string          TG_CHAT_ID           = "394044850";
-input long            TG_THREAD_ID         = 0;
+input long            TG_THREAD_ID         = 0; 
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Master Strategy Selection ---
