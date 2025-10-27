@@ -2271,29 +2271,26 @@ void TryScalpEntries()
     
     // If no main trade was found, calculate a theoretical one
     if(!tpOk)
-    {
-        // This block calculates what a main trade's TP would be
-        double pH, pL, atrMain;
-        if(GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH, pL, atrMain))
         {
-            // First, try to use the main RR range
-            if(Use_RR_Range)
+            // This block calculates what a main trade's TP would be
+            double pH, pL, atrMain;
+            if(GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH, pL, atrMain))
             {
-                double chosenR=0, dynTP=0;
-                tpOk = PickRRTarget(buy, entry, sl, atrMain, pH, pL,
-                                  RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
-                                  chosenR, dynTP);
-                if(tpOk) tp = dynTP;
-            }
-            // Fallback to main Fib if RR range fails
-            if(!tpOk)
-            {
-                double leg = MathAbs(pH - pL);
-                tp = buy ? (pH + 2.618 * leg) : (pL - 2.618 * leg);
-                tpOk = (tp != 0); // Mark tp as OK if it was calculated
+                // First, try to use the main RR range
+                if(Use_RR_Range)
+                {
+                    double chosenR=0, dynTP=0;
+                    tpOk = PickRRTarget(buy, entry, sl, atrMain, pH, pL,
+                                      RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
+                                      chosenR, dynTP);
+                    if(tpOk) tp = dynTP;
+                }
+                
+                // NOTE: We have REMOVED the Fib fallback logic.
+                // If tpOk is still false, the trade will be rejected
+                // by the safety check on line 682.
             }
         }
-    }
     
     // If tp is still 0.0, it means the trade failed both RR Range and Multi-Fib checks.
     // --- FIX: This check was incorrect. It should check !tpOk ---
@@ -2614,17 +2611,22 @@ void TryEntries()
             
             // --- TP: try RR range; if no valid, FALLBACK TO FIB (no single RR)
             bool tpOk=false;
-            if(Use_RR_Range){
-                double chosenR=0, dynTP=0;
-                tpOk = PickRRTarget(true, entry, sl, atr, pH, pL,
-                                  RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
-                                  chosenR, dynTP);
-                if(tpOk) tp = dynTP;
-            }
-            if(!tpOk){
-                double leg = MathAbs(pH - pL);
-                tp = pH + 2.618 * leg; // Fib fallback
-            }
+                if(Use_RR_Range){
+                    double chosenR=0, dynTP=0;
+                    tpOk = PickRRTarget(true, entry, sl, atr, pH, pL,
+                                      RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
+                                      chosenR, dynTP);
+                    if(tpOk) tp = dynTP;
+                }
+                
+                // --- THIS IS THE FIX ---
+                if(!tpOk)
+                {
+                    // If we are here, it means PickRRTarget failed to find a TP
+                    // that respects your RR_Min. We will NOT use the Fib fallback.
+                    // We will skip the trade instead.
+                    return;
+                }
             
             // ======= FRESH FLIP + RETEST + CONFIRM (BUY) =======
             bool allowStage=false;
