@@ -130,13 +130,13 @@ input double         Breakout_Min_Body_ATR_Mult = 0.2; // Body must be > 20% of 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = false;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input int            Max_Entry_Stages   = 3;        // Allow adding to a trade up to X times.
+input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
 input int            Stage_Cooldown_Bars = 1; // Bars to wait before adding next stage
-input bool           One_Trade_At_A_Time = true;   // If true, only one main trade is allowed at a time.
+input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
-input int            Scalp_Max_Concurrent = 3;      // Max number of simultaneous scalp trades.
+input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
 
 // --- NEW: DYNAMIC SPREAD FILTER ---
 input bool           Use_Dynamic_Spread_Filter = false;  // Enable/disable the dynamic spread filter.
@@ -2570,7 +2570,7 @@ void TryEntries()
                                      "📊 <b>Symbol:</b> %s\n"
                                      "📈 <b>Current Positions:</b> %d\n"
                                      "📉 <b>Max Allowed:</b> 1\n"
-                                     "⚡ <b>Signal:</b> %s",
+                                     "⚡ <b>Signal:</b> Main Trend\n\n",
                                      _Symbol,
                                      CountOpen(),
                                      buyCond ? "BUY" : (sellCond ? "SELL" : "N/A")
