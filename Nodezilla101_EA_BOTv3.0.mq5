@@ -21,9 +21,9 @@ CTrade Trade;
 input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place trades, false = signals only
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
-input string          TG_CHAT_ID           = "394044850";
-input long            TG_THREAD_ID         = 0;
+input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
+input string          TG_CHAT_ID           = "-1002073947481";
+input long            TG_THREAD_ID         = 333;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Master Strategy Selection ---
@@ -919,7 +919,7 @@ void ManageRetraceMarketEntry()
         
         bool tpOk=false;
         if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(true, entryPrice, new_sl, atr_main, pH_main, pL_main, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) new_tp = dynTP; }
-        if(!tpOk) { double leg = MathAbs(pH_main - pL_main); new_tp = pH_main + 1.618 * leg; }
+        if(!tpOk) { double leg = MathAbs(pH_main - pL_main); new_tp = pH_main + 2.618 * leg; }
     }
     else // Sell
     {
@@ -930,7 +930,7 @@ void ManageRetraceMarketEntry()
         
         bool tpOk=false;
         if(Use_RR_Range) { double chosenR=0, dynTP=0; tpOk = PickRRTarget(false, entryPrice, new_sl, atr_main, pH_main, pL_main, RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult, chosenR, dynTP); if(tpOk) new_tp = dynTP; }
-        if(!tpOk) { double leg = MathAbs(pH_main - pL_main); new_tp = pL_main - 1.618 * leg; }
+        if(!tpOk) { double leg = MathAbs(pH_main - pL_main); new_tp = pL_main - 2.618 * leg; }
     }
     
     // --- 10. Sanitize & Calculate Lots ---
@@ -2183,16 +2183,6 @@ void TryScalpEntries()
         if(htfDir<0) buy  = false;   // HTF bearish → allow only SELL scalps
     }
     
-    // ======================= ENTRY MODE GATE ===========================
-        // Block trend-following scalp signals if Entry_Mode is set to Reversal-Only
-    if(Entry_Mode != 0 && Entry_Mode != 2) // 0=Trend-Following, 2=BOTH
-        return;
-        {
-            buy = false;
-            sell = false;
-        }
-        // ===================================================================
-    
     if(!(buy || sell)) return;
     
     // --- Smart Trend Confirmation Logic for Scalp ---
@@ -2281,26 +2271,29 @@ void TryScalpEntries()
     
     // If no main trade was found, calculate a theoretical one
     if(!tpOk)
+    {
+        // This block calculates what a main trade's TP would be
+        double pH, pL, atrMain;
+        if(GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH, pL, atrMain))
         {
-            // This block calculates what a main trade's TP would be
-            double pH, pL, atrMain;
-            if(GetSwingsATR(TF_Trade, 300, ST_ATR_Period, pH, pL, atrMain))
+            // First, try to use the main RR range
+            if(Use_RR_Range)
             {
-                // First, try to use the main RR range
-                if(Use_RR_Range)
-                {
-                    double chosenR=0, dynTP=0;
-                    tpOk = PickRRTarget(buy, entry, sl, atrMain, pH, pL,
-                                      RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
-                                      chosenR, dynTP);
-                    if(tpOk) tp = dynTP;
-                }
-                
-                // NOTE: We have REMOVED the Fib fallback logic.
-                // If tpOk is still false, the trade will be rejected
-                // by the safety check on line 682.
+                double chosenR=0, dynTP=0;
+                tpOk = PickRRTarget(buy, entry, sl, atrMain, pH, pL,
+                                  RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
+                                  chosenR, dynTP);
+                if(tpOk) tp = dynTP;
+            }
+            // Fallback to main Fib if RR range fails
+            if(!tpOk)
+            {
+                double leg = MathAbs(pH - pL);
+                tp = buy ? (pH + 2.618 * leg) : (pL - 2.618 * leg);
+                tpOk = (tp != 0); // Mark tp as OK if it was calculated
             }
         }
+    }
     
     // If tp is still 0.0, it means the trade failed both RR Range and Multi-Fib checks.
     // --- FIX: This check was incorrect. It should check !tpOk ---
@@ -2376,7 +2369,7 @@ void TryScalpEntries()
     
     // --- Send Signal & Execute Trade ---
     // --- FIX: Set the correct magic number based on direction ---
-    Trade.SetExpertMagicNumber(Magic_Scalp);
+    Trade.SetExpertMagicNumber(buy ? Magic_Scalp : Magic_Scalp_Rev);
     bool sent = false;
     
     string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
@@ -2567,19 +2560,6 @@ void TryEntries()
         
     }
     // ======================================================================
-    // ======================================================================
-
-        // <<< --- ADD THIS NEW BLOCK --- >>>
-        // ======================= ENTRY MODE GATE ===========================
-        // Block trend-following signals if Entry_Mode is set to Reversal-Only
-    if(Entry_Mode != 0 && Entry_Mode != 2) // 0=Trend-Following, 2=BOTH
-        return;
-        {
-            buyCond = false;
-            sellCond = false;
-        }
-        // ===================================================================
-        // <<< --- END NEW BLOCK --- >>>
     
     // One position at a time (per symbol/magic)
     if(One_Trade_At_A_Time && CountOpenMain()>0)
@@ -2634,22 +2614,17 @@ void TryEntries()
             
             // --- TP: try RR range; if no valid, FALLBACK TO FIB (no single RR)
             bool tpOk=false;
-                if(Use_RR_Range){
-                    double chosenR=0, dynTP=0;
-                    tpOk = PickRRTarget(true, entry, sl, atr, pH, pL,
-                                      RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
-                                      chosenR, dynTP);
-                    if(tpOk) tp = dynTP;
-                }
-                
-                // --- THIS IS THE FIX ---
-                if(!tpOk)
-                {
-                    // If we are here, it means PickRRTarget failed to find a TP
-                    // that respects your RR_Min. We will NOT use the Fib fallback.
-                    // We will skip the trade instead.
-                    return;
-                }
+            if(Use_RR_Range){
+                double chosenR=0, dynTP=0;
+                tpOk = PickRRTarget(true, entry, sl, atr, pH, pL,
+                                  RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
+                                  chosenR, dynTP);
+                if(tpOk) tp = dynTP;
+            }
+            if(!tpOk){
+                double leg = MathAbs(pH - pL);
+                tp = pH + 2.618 * leg; // Fib fallback
+            }
             
             // ======= FRESH FLIP + RETEST + CONFIRM (BUY) =======
             bool allowStage=false;
@@ -2774,22 +2749,17 @@ void TryEntries()
             
             // --- TP: try RR range; if no valid, FALLBACK TO FIB (no single RR)
             bool tpOk=false;
-                if(Use_RR_Range){
-                    double chosenR=0, dynTP=0;
-                    tpOk = PickRRTarget(true, entry, sl, atr, pH, pL,
-                                      RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
-                                      chosenR, dynTP);
-                    if(tpOk) tp = dynTP;
-                }
-                
-                // --- THIS IS THE FIX ---
-                if(!tpOk)
-                {
-                    // If we are here, it means PickRRTarget failed to find a TP
-                    // that respects your RR_Min. We will NOT use the Fib fallback.
-                    // We will skip the trade instead.
-                    return;
-                }
+            if(Use_RR_Range){
+                double chosenR=0, dynTP=0;
+                tpOk = PickRRTarget(false, entry, sl, atr, pH, pL,
+                                  RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
+                                  chosenR, dynTP);
+                if(tpOk) tp = dynTP;
+            }
+            if(!tpOk){
+                double leg = MathAbs(pH - pL);
+                tp = pL - 2.618 * leg; // Fib fallback
+            }
             
             // ======= FRESH FLIP + RETEST + CONFIRM (SELL) =======
             bool allowStage=false;
@@ -2847,7 +2817,7 @@ void TryEntries()
             if(Auto_Trade)
             {
                 // --- FIX: Set the correct magic number for a main SELL trade ---
-                Trade.SetExpertMagicNumber(Magic_Main);
+                Trade.SetExpertMagicNumber(Magic_Main_Rev);
                 bool sent=false;
                 double msgEntryPrice = entry;
                 
@@ -2903,208 +2873,6 @@ void TryEntries()
         }
     }
 }
-
-// ====================== EA Reversal Entries ======================
-void TryReversalEntries()
-{
-    // ====================== PRIMARY GUARDS ======================
-    
-    // 1. Check if Reversal entries are enabled
-    if(Entry_Mode != 1 && Entry_Mode != 2) // 1=Reversal, 2=BOTH
-        return;
-        
-    // 2. This strategy is BUILT on the WPR filter, so if it's off, we can't run.
-    if(!Use_OverboughtOversold_Filter)
-        return;
-
-    // ====================== PER-BAR + COOLDOWN GUARDS ======================
-    // This function runs on the main bar, so we can use the global cooldown
-    datetime barTime = iTime(_Symbol, TF_Trade, 0);
-    if(lastTradeBarTime!=0 && (barTime - lastTradeBarTime) < (long)PeriodSeconds(TF_Trade)*Cooldown_Bars)
-        return; // enforce N-bar cooldown after a fill
-    // ======================================================================
-
-    // ================================ FILTERS ==============================
-    
-    // 1. Get Main Trend Direction
-    double stLineM15=0;
-    int    dirM15=0;
-    if(!CalcSuperTrend(TF_Trade, ST_ATR_Period, ST_ATR_Mult, 1, stLineM15, dirM15) || dirM15 == 0)
-        return; // No valid trend to trade against
-
-    // 2. Get WPR Value
-    double wpr = WPRValue(TF_Trade,1);
-
-    // ======================= REVERSAL SIGNAL LOGIC =======================
-    
-    // --- Reversal Buy Signal ---
-    // Trend is DOWN, but price is OVERSOLD
-    bool buyCond = (dirM15 < 0 && wpr < WPR_Oversold_Level);
-    
-    // --- Reversal Sell Signal ---
-    // Trend is UP, but price is OVERBOUGHT
-    bool sellCond = (dirM15 > 0 && wpr > WPR_Overbought_Level);
-    
-    // If no signal, exit
-    if(!(buyCond || sellCond))
-        return;
-        
-    // ======================= STAGING/CONCURRENT GUARD =======================
-    
-    // Note: The stageCount is reset in OnTick on the main trend flip,
-    // which is shared by this function, so we don't need to reset it here.
-    
-    // Check max position guard (uses stageCount reset by ST flip)
-    if(stageCount >= Max_Entry_Stages)
-    {
-        return;
-    }
-
-    // =========================== BUILD SL / TP ============================
-    if(buyCond || sellCond)
-    {
-        int bH; double pH; int bL; double pL;
-        if(!RecentSwings(TF_Trade, 300, bH,pH,bL,pL)) return;
-        
-        // ATR on trade TF
-        int hATR = iATR(_Symbol, TF_Trade, ST_ATR_Period);
-        double atr=0.0;
-        if(hATR!=INVALID_HANDLE)
-        {
-            double a[]; ArraySetAsSeries(a,true);
-            if(CopyBuffer(hATR,0,0,3,a)>=2) atr = a[1];
-            IndicatorRelease(hATR);
-        }
-        if(atr<=0.0) return;
-        
-        double sl=0, tp=0;
-        double ask=SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        double bid=SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        
-        double entry = buyCond ? ask : bid;
-        
-        // --- SL: We use the same robust logic as the trend strategy ---
-        if(Use_Dynamic_SL_ATR){
-            if(!PickSL_DynamicATR(buyCond, entry, atr, pH, pL, SL_ATR_Min, SL_ATR_Max, SL_Swing_Pad_ATR, sl))
-                return;
-        }else{
-            sl = buyCond ? (pL - ATR_SL_Buffer_Mult * atr) : (pH + ATR_SL_Buffer_Mult * atr);
-        }
-        
-        // --- TP: We use the same RR-based logic ---
-        bool tpOk=false;
-        if(Use_RR_Range){
-            double chosenR=0, dynTP=0;
-            tpOk = PickRRTarget(buyCond, entry, sl, atr, pH, pL,
-                              RR_Min, RR_Max, TP_Max_ATR_Mult, TP_Swing_Ext_ATR_Mult,
-                              chosenR, dynTP);
-            if(tpOk) tp = dynTP;
-        }
-        
-        // --- THIS IS THE CRITICAL FIX ---
-        // If no TP was found that respects RR_Min, we ABORT the trade.
-        if(!tpOk)
-        {
-            return;
-        }
-        
-        // --- Push SL beyond SuperTrend (more conservative)
-        if(Use_ST_as_Stop){
-            double stPad = ST_Stop_Pad_Mult * atr;
-            if(buyCond) sl = MathMin(sl, stLineM15 - stPad);
-            else sl = MathMax(sl, stLineM15 + stPad);
-        }
-        
-        // --- sanitize & final guards
-        { double ssl=sl, stp=tp; SanitizeStops(buyCond ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, ssl, stp); sl=ssl; tp=stp; }
-        if(TP_Pullback_ATR_Mult > 0 && tp > 0)
-        {
-            if(buyCond) tp = tp - (TP_Pullback_ATR_Mult * atr);
-            else tp = tp + (TP_Pullback_ATR_Mult * atr);
-        }
-        // --- Final Sanity Check: Ensure SL is valid ---
-        if(buyCond)
-        {
-            // For a BUY, the SL must be BELOW the entry price
-            if(sl >= entry) return;
-        }
-        else // This is a sellCond
-        {
-            // For a SELL, the SL must be ABOVE the entry price
-            if(sl <= entry) return;
-        }
-        
-        // ======================== EXECUTE TRADE =========================
-        
-        if(Auto_Trade)
-        {
-            // --- SET THE REVERSAL MAGIC NUMBER ---
-            Trade.SetExpertMagicNumber(Magic_Main_Rev);
-            bool sent=false;
-            double msgEntryPrice = entry;
-            string tag = buyCond ? "V25 Rev Buy" : "V25 Rev Sell";
-            
-            if(Use_Pending_Stop_Entries)
-            {
-                if(CountPendingThisEA()>0) return; // This func only counts Main orders, which is fine
-                
-                double stopPrice = 0.0;
-                if(buyCond) // For a BUY reversal, we are at a LOW, so we use a BUY STOP
-                {
-                   stopPrice = iHigh(_Symbol, TF_Trade, 1) + StopEntry_Offset_ATR * atr;
-                }
-                else // For a SELL reversal, we are at a HIGH, so we use a SELL STOP
-                {
-                   stopPrice = iLow(_Symbol, TF_Trade, 1) - StopEntry_Offset_ATR * atr;
-                }
-                
-                double riskPtsForLots = MathAbs(stopPrice - sl) / _Point;
-                if(riskPtsForLots <= MinStopPoints()) return;
-                
-                double lots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                if(lots <= 0) lots = Fixed_Lots;
-                if(lots <= 0) return;
-                
-                msgEntryPrice = stopPrice;
-                datetime expiration = TimeCurrent() + (StopEntry_Expiry_Bars * PeriodSeconds(TF_Trade));
-                
-                if(buyCond)
-                    sent = Trade.BuyStop(lots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration, tag);
-                else
-                    sent = Trade.SellStop(lots, stopPrice, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiration, tag);
-            }
-            else
-            {
-                // Market Order
-                double riskPtsForLots = MathAbs(entry - sl) / _Point;
-                if(riskPtsForLots <= MinStopPoints()) return;
-
-                double lots = LotsByRisk(Risk_Percent, riskPtsForLots);
-                if(lots <= 0) lots = Fixed_Lots;
-                if(lots <= 0) return;
-                
-                if(buyCond)
-                    sent = Trade.Buy(lots, _Symbol, 0, sl, tp, tag);
-                else
-                    sent = Trade.Sell(lots, _Symbol, 0, sl, tp, tag);
-            }
-            
-            if(sent)
-            {
-                SendTG(StringFormat("[🔄 %s placed\nEntry %.2f\nSL %.2f\nTP %.2f]", tag, msgEntryPrice, sl, tp));
-                lastTradeBarTime = barTime;
-                stageCount = MathMin(stageCount+1, Max_Entry_Stages);
-                lastStageBar = barTime;
-            }
-            else
-            {
-                SendTG(StringFormat("❌ %s send failed: ret=%d", tag, Trade.ResultRetcode()));
-            }
-        }
-    }
-}
-// =================================================================
-// =================================================================
 
 void ManageOpenPositions()
 
@@ -3757,7 +3525,6 @@ void OnTick()
         
         // Run functions related to the MAIN strategy timeframe
         TryEntries();             // Check main entries
-        TryReversalEntries();
         ManagePendingOrders();    // Check pending orders (uses main/scalp cancel TFs internally)
         ManageRetraceLimitOrders(); // Check retracement orders (uses main cancel TF internally)
         TouchUpManualInitial();   // Check manual trades
