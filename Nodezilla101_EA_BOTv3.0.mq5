@@ -21,9 +21,9 @@ CTrade Trade;
 input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place trades, false = signals only
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
-input string          TG_CHAT_ID           = "394044850";
-input long            TG_THREAD_ID         = 0; 
+input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
+input string          TG_CHAT_ID           = "-1002073947481";
+input long            TG_THREAD_ID         = 333;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Master Strategy Selection ---
@@ -3935,4 +3935,19 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             }
         }
     }
+}
+//+------------------------------------------------------------------+
+//| Custom Optimization Criterion: Profit-to-Drawdown under 10%      |
+//+------------------------------------------------------------------+
+double OnTester()
+{
+   double netProfit   = TesterStatistics(STAT_PROFIT);               // total net profit
+   double drawdownPct = TesterStatistics(STAT_EQUITY_DDREL_PERCENT); // max equity drawdown %
+
+   // Ignore any run that exceeds 10% drawdown
+   if (drawdownPct > 10.0)
+      return 0.0; // discard this run entirely
+
+   // Reward profit efficiency vs drawdown
+   return netProfit / (drawdownPct + 1.0); // higher = better
 }
