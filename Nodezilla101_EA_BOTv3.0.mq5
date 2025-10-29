@@ -21,9 +21,9 @@ CTrade Trade;
 input bool           Auto_Trade       = true;     // MASTER SWITCH: true = place trades, false = signals only
 
 //---- Telegram
-input string          TG_BOT_TOKEN         = "7282987011:AAEhNJa4-dxTcD6WAlSULezrbO3JtDg85t8";
-input string          TG_CHAT_ID           = "-1002073947481";
-input long            TG_THREAD_ID         = 333;
+input string          TG_BOT_TOKEN         = "7923520753:AAGmdxtRevcxVa_bg3BdNVvkzFj1_4gCoC8";
+input string          TG_CHAT_ID           = "394044850";
+input long            TG_THREAD_ID         = 0;
 input bool            TG_Send_Images       = false; // reserved (text only here)
 
 // --- Master Strategy Selection ---
@@ -130,13 +130,13 @@ input double         Breakout_Min_Body_ATR_Mult = 0.2; // Body must be > 20% of 
 // --- Main Strategy Filters ---
 input bool           Use_H1H4_Filter    = false;     // Require main trades to align with H1/H4 SuperTrend.
 input bool           Use_ST_Flip_Retest = false;      // Wait for price to pull back to the ST line before entry.
-input int            Max_Entry_Stages   = 3;        // Allow adding to a trade up to X times.
+input int            Max_Entry_Stages   = 4;        // Allow adding to a trade up to X times.
 input int            Stage_Cooldown_Bars = 1; // Bars to wait before adding next stage
-input bool           One_Trade_At_A_Time = true;   // If true, only one main trade is allowed at a time.
+input bool           One_Trade_At_A_Time = false;   // If true, only one main trade is allowed at a time.
 
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Only_When_No_Main = false; // Block scalps if a main trade is already open.
-input int            Scalp_Max_Concurrent = 3;      // Max number of simultaneous scalp trades.
+input int            Scalp_Max_Concurrent = 6;      // Max number of simultaneous scalp trades.
 
 // --- NEW: DYNAMIC SPREAD FILTER ---
 input bool           Use_Dynamic_Spread_Filter = false;  // Enable/disable the dynamic spread filter.
@@ -209,7 +209,7 @@ input double         Manual_TP_Swing_Ext_ATR_Mult = 1.50;
 
 // --- Detailed SL/TP Mechanics ---
 input bool           Use_Fib_Targets    = true;
-input bool           Use_RR_Range       = false;
+input bool           Use_RR_Range       = true;
 input bool           Scalp_Use_RR_Range = true;
 input bool           Use_Dynamic_SL_ATR = true;
 input double         ATR_SL_Buffer_Mult = 0.1;
@@ -1048,8 +1048,8 @@ void ManagePendingOrders()
                     Trade.OrderDelete(ticket);
                     if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
                     {
-                        SendTG(StringFormat("🔵 <b>PENDING ORDER CANCELED</b>\n\n"
-                                            "📊 <b>Symbol:</b> %s\n"
+                        SendTG(StringFormat(" <b>PENDING ORDER CANCELED</b>\n\n"
+                                            " <b>Symbol:</b> %s\n"
                                             "⚡ <b>Reason:</b> Trend flipped on %s.",
                                             _Symbol, tfstr(relevant_TF)));
                     }
@@ -1633,8 +1633,8 @@ void EmergencyCloseAllPositions(const string reason)
     if (positionsClosedCount > 0)
     {
         string alertMsg = StringFormat(
-                                       "🚨 <b>CIRCUIT BREAKER TRIPPED</b> 🚨\n\n"
-                                       "📊 <b>Symbol:</b> %s\n"
+                                       " <b>CIRCUIT BREAKER TRIPPED</b> \n\n"
+                                       " <b>Symbol:</b> %s\n"
                                        "⚡ <b>Reason:</b> %s\n\n"
                                        "<i>%d position(s) have been closed to prevent further loss.</i>",
                                        _Symbol, reason, positionsClosedCount
@@ -1739,7 +1739,7 @@ void TouchUpManualInitial()
                 Trade.PositionModify(_Symbol, modSL, modTP);
                 if (Trade.ResultRetcode() == TRADE_RETCODE_DONE)
                 {
-                    SendTG(StringFormat("🔧 Manual %s on %s: set %s%s\nSL: %.2f  TP: %.2f",
+                    SendTG(StringFormat(" Manual %s on %s: set %s%s\nSL: %.2f  TP: %.2f",
                                         isBuy?"BUY":"SELL", _Symbol,
                                         needSL?"SL ":"", needTP?"TP":"", modSL, modTP));
                 }
@@ -1945,14 +1945,14 @@ void CheckPartialClose(ulong ticket, long type, double entry, double sl, double 
                 AddToPartialClosed(ticket);
                 
                 string msg = StringFormat(
-                                          "💰 <b>PARTIAL CLOSE EXECUTED</b>\n\n"
-                                          "📊 <b>Symbol:</b> %s\n"
-                                          "🔢 <b>Ticket:</b> %I64u\n"
-                                          "📈 <b>Type:</b> %s\n"
+                                          " <b>PARTIAL CLOSE EXECUTED</b>\n\n"
+                                          " <b>Symbol:</b> %s\n"
+                                          " <b>Ticket:</b> %I64u\n"
+                                          " <b>Type:</b> %s\n"
                                           "⚡ <b>Progress to TP:</b> %.1f%%\n"
-                                          "📦 <b>Volume Closed:</b> %.2f lots (%.1f%%)\n"
-                                          "🎯 <b>Remaining Volume:</b> %.2f lots\n"
-                                          "💬 <b>Comment:</b> %s",
+                                          " <b>Volume Closed:</b> %.2f lots (%.1f%%)\n"
+                                          " <b>Remaining Volume:</b> %.2f lots\n"
+                                          " <b>Comment:</b> %s",
                                           _Symbol,
                                           ticket,
                                           (type == POSITION_TYPE_BUY) ? "BUY" : "SELL",
@@ -2025,6 +2025,28 @@ int CountOpenScalp()
             // Check if it's a scalp magic number
             long magic = PositionGetInteger(POSITION_MAGIC);
             if(magic == Magic_Scalp || magic == Magic_Scalp_Rev)
+            {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+int CountOpenMain()
+{
+    int count = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionSelectByTicket(PositionGetTicket(i)))
+        {
+            // Check if symbol matches
+            if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+                continue;
+
+            // Check if it's a MAIN trade magic number
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            if(magic == Magic_Main || magic == Magic_Main_Rev)
             {
                 count++;
             }
@@ -2278,8 +2300,8 @@ void TryScalpEntries()
     if(!tpOk || tp == 0.0)
     {
         string rejectMsg = StringFormat(
-                                     "🚫 <b>SCALP %s REJECTED</b>\n\n"
-                                     "📊 <b>Symbol:</b> %s\n"
+                                     " <b>SCALP %s REJECTED</b>\n\n"
+                                     " <b>Symbol:</b> %s\n"
                                      "⚡ <b>Reason:</b> Failed to find TP > Min RR (%.1f)",
                                      buy ? "BUY" : "SELL",
                                      _Symbol,
@@ -2350,12 +2372,12 @@ void TryScalpEntries()
     Trade.SetExpertMagicNumber(buy ? Magic_Scalp : Magic_Scalp_Rev);
     bool sent = false;
     
-    string signalType = buy ? "🟢 SCALP BUY SIGNAL 🟢" : "🔴 SCALP SELL SIGNAL 🔴";
+    string signalType = buy ? " SCALP BUY SIGNAL " : " SCALP SELL SIGNAL ";
     string signalMsg = StringFormat(
                                    "<b>%s</b> (%s)\n\n"
-                                   "📊 <b>Symbol:</b> %s\n"
+                                   " <b>Symbol:</b> %s\n"
                                    "⏰ <b>Timeframe:</b> %s\n"
-                                   "💰 <b>Entry Price:</b> %s\n"
+                                   " <b>Entry Price:</b> %s\n"
                                    "⚡ <b>Strategy:</b> Scalp\n\n"
                                    "<i>Preparing to execute trade...</i>",
                                    signalType, entryType,
@@ -2540,25 +2562,20 @@ void TryEntries()
     // ======================================================================
     
     // One position at a time (per symbol/magic)
-    if(One_Trade_At_A_Time && CountOpen()>0)
+    if(One_Trade_At_A_Time && CountOpenMain()>0)
     {
-        // --- NOTE: This block was sending a TG message on every bar
-        // --- which can be spammy. I am commenting out the SendTG call.
-        // --- Remove the "//" if you want the "REJECTED" message.
-        /*
         string rejectMsg = StringFormat(
-                                     "🚫 <b>TRADE REJECTED - Max Positions</b>\n\n"
+                                     " <b>TRADE REJECTED - Max Positions</b>\n\n"
                                      "⏰ <b>Timeframe:</b> %s\n"
-                                     "📊 <b>Symbol:</b> %s\n"
-                                     "📈 <b>Current Positions:</b> %d\n"
-                                     "📉 <b>Max Allowed:</b> 1\n"
-                                     "⚡ <b>Signal:</b> %s",
+                                     " <b>Symbol:</b> %s\n"
+                                     " <b>Current Positions:</b> %d\n"
+                                     " <b>Max Allowed:</b> 1\n"
+                                     "⚡ <b>Signal:</b> Main Trend\n\n",
                                      _Symbol,
                                      CountOpen(),
                                      buyCond ? "BUY" : (sellCond ? "SELL" : "N/A")
                                      );
         SendTG(rejectMsg);
-        */
         return;
     }
     // =========================== BUILD SL / TP ============================
@@ -2657,7 +2674,7 @@ void TryEntries()
             }
             
             // --- Send
-            SendTG(StringFormat("📈 <b>BUY Setup</b> %s %s\nST:%s  Alligator:bull  AO:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
+            SendTG(StringFormat(" <b>BUY Setup</b> %s %s\nST:%s  Alligator:bull  AO:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
                                 _Symbol, tfstr(TF_Trade), "UP", ao, w, entry, sl, tp));
             
             if(Auto_Trade)
@@ -2683,11 +2700,11 @@ void TryEntries()
                                      ORDER_TIME_SPECIFIED, expiration_buy, "V25 BuyStop");
                     
                     string buySignalMsg = StringFormat(
-                                                     "🟢 <b>BUY SIGNAL DETECTED</b> 🟢\n\n"
-                                                     "📊 <b>Symbol:</b> %s\n"
+                                                     " <b>BUY SIGNAL DETECTED</b> \n\n"
+                                                     " <b>Symbol:</b> %s\n"
                                                      "⏰ <b>Timeframe:</b> %s\n"
-                                                     "💰 <b>Current Price:</b> %s\n"
-                                                     "📈 <b>SuperTrend:</b> %s\n"
+                                                     " <b>Current Price:</b> %s\n"
+                                                     " <b>SuperTrend:</b> %s\n"
                                                      "⚡ <b>Strategy:</b> Main Trend\n\n"
                                                      "<i>Preparing to execute trade...</i>",
                                                      _Symbol,
@@ -2705,7 +2722,7 @@ void TryEntries()
                 
                 if(sent)
                 {
-                    SendTG(StringFormat("[📈 BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
+                    SendTG(StringFormat("[ BUY placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
                     lastTradeBarTime = iTime(_Symbol, TF_Trade, 0);
                     stageCount = MathMin(stageCount+1, Max_Entry_Stages);
                     lastStageBar = iTime(_Symbol, TF_Trade, 0);
@@ -2794,7 +2811,7 @@ void TryEntries()
             }
             
             // --- Send
-            SendTG(StringFormat("📉 <b>SELL Setup</b> %s %s\nST:%s  Alligator:bear  AO:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
+            SendTG(StringFormat(" <b>SELL Setup</b> %s %s\nST:%s  Alligator:bear  AO:%.2f  WPR:%.1f\nEntry: %.2f  SL: %.2f  TP: %.2f",
                                 _Symbol, tfstr(TF_Trade), "DOWN", ao, w, entry, sl, tp));
             
             if(Auto_Trade)
@@ -2820,11 +2837,11 @@ void TryEntries()
                                       ORDER_TIME_SPECIFIED, expiration_sell, "V25 SellStop");
                     
                     string sellSignalMsg = StringFormat(
-                                                      "🔴 <b>SELL SIGNAL DETECTED</b> 🔴\n\n"
-                                                      "📊 <b>Symbol:</b> %s\n"
+                                                      " <b>SELL SIGNAL DETECTED</b> \n\n"
+                                                      " <b>Symbol:</b> %s\n"
                                                       "⏰ <b>Timeframe:</b> %s\n"
-                                                      "💰 <b>Current Price:</b> %s\n"
-                                                      "📉 <b>SuperTrend:</b> %s\n"
+                                                      " <b>Current Price:</b> %s\n"
+                                                      " <b>SuperTrend:</b> %s\n"
                                                       "⚡ <b>Strategy:</b> Main Trend\n\n"
                                                       "<i>Preparing to execute trade...</i>",
                                                       _Symbol,
@@ -2842,7 +2859,7 @@ void TryEntries()
                 
                 if(sent)
                 {
-                    SendTG(StringFormat("[📉 SELL placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
+                    SendTG(StringFormat("[ SELL placed\nEntry %.2f\nSL %.2f\nTP %.2f]", msgEntryPrice, sl, tp));
                     lastTradeBarTime = iTime(_Symbol, TF_Trade, 0);
                     stageCount = MathMin(stageCount+1, Max_Entry_Stages);
                     lastStageBar = iTime(_Symbol, TF_Trade, 0);
@@ -2952,14 +2969,14 @@ void ManageOpenPositions()
                 
                 // --- Send Detailed Alert ---
                 string flipMsg = StringFormat(
-                                              "🛑 <b>POSITION CLOSED (Trend Flip)</b> 🛑\n\n"
-                                              "📊 <b>Symbol:</b> %s\n"
-                                              "🔢 <b>Ticket:</b> %I64u\n"
-                                              "📈 <b>Type:</b> %s\n"
-                                              "💬 <b>Comment:</b> %s\n\n"
+                                              " <b>POSITION CLOSED (Trend Flip)</b> \n\n"
+                                              " <b>Symbol:</b> %s\n"
+                                              " <b>Ticket:</b> %I64u\n"
+                                              " <b>Type:</b> %s\n"
+                                              " <b>Comment:</b> %s\n\n"
                                               "▶️ <b>Entry:</b> %s\n"
                                               "⏹️ <b>Exit:</b> %s\n"
-                                              "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                                              " <b>Profit/Loss:</b> %s%s%.2f\n\n"
                                               "⚡ <b>Reason:</b> MAIN TREND flipped on %s.",
                                               _Symbol,
                                               ticket,
@@ -2999,14 +3016,14 @@ void ManageOpenPositions()
                 
                 // --- Send Detailed Alert ---
                 string scalpFlipMsg = StringFormat(
-                                                   "🛑 <b>SCALP CLOSED (Trend Flip)</b> 🛑\n\n"
-                                                   "📊 <b>Symbol:</b> %s\n"
-                                                   "🔢 <b>Ticket:</b> %I64u\n"
-                                                   "📈 <b>Type:</b> %s\n"
-                                                   "💬 <b>Comment:</b> %s\n\n"
+                                                   " <b>SCALP CLOSED (Trend Flip)</b> \n\n"
+                                                   " <b>Symbol:</b> %s\n"
+                                                   " <b>Ticket:</b> %I64u\n"
+                                                   " <b>Type:</b> %s\n"
+                                                   " <b>Comment:</b> %s\n\n"
                                                    "▶️ <b>Entry:</b> %s\n"
                                                    "⏹️ <b>Exit:</b> %s\n"
-                                                   "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                                                   " <b>Profit/Loss:</b> %s%s%.2f\n\n"
                                                    "⚡ <b>Reason:</b> SCALP TREND flipped on %s.",
                                                    _Symbol,
                                                    ticket,
@@ -3078,7 +3095,7 @@ void ManageOpenPositions()
                                             "</b>MOMENTUM DIVERGENCE</b>\n"
                                             "<b>Detected on</b>: %s.\n" // <-- Uses dynamic timeframe
                                             
-                                            "<b>💰 Profit/Loss:</b> %s%.2f"
+                                            "<b> Profit/Loss:</b> %s%.2f"
                                             "<b>(Exit: %.2f)</b>",
                                             
                                             profitEmoji, pcomment,
@@ -3140,10 +3157,10 @@ void ManageOpenPositions()
                                 // --- 6. BREAKEVEN ACTIVATED ---
                                 double progressPercent = (currentProgress / totalDistToTP) * 100.0;
                                 string beMsg = StringFormat(
-                                                            "💰 <b>BREAKEVEN ACTIVATED</b>\n\n"
-                                                            "📊 <b>Symbol:</b> %s\n"
-                                                            "📈 <b>Type:</b> %s\n"
-                                                            "🛑 <b>New SL:</b> %s\n"
+                                                            " <b>BREAKEVEN ACTIVATED</b>\n\n"
+                                                            " <b>Symbol:</b> %s\n"
+                                                            " <b>Type:</b> %s\n"
+                                                            " <b>New SL:</b> %s\n"
                                                             "⚡ <b>Progress:</b> %.1f%% to TP",
                                                             _Symbol,
                                                             (type == POSITION_TYPE_BUY) ? "BUY" : "SELL",
@@ -3221,10 +3238,10 @@ void ManageOpenPositions()
                     
                     // --- UPDATED ALERT ---
                     SendTG(StringFormat("⚠️ <b>TP TIGHTENED</b> (Market Weakness)\n\n"
-                                        "📊 <b>Symbol:</b> %s\n"
-                                        "🔢 <b>Ticket:</b> %I64u\n"
-                                        "🎯 <b>Old TP:</b> %s\n"
-                                        "🎯 <b>New TP:</b> %s (Adjusted to ST Line)\n"
+                                        " <b>Symbol:</b> %s\n"
+                                        " <b>Ticket:</b> %I64u\n"
+                                        " <b>Old TP:</b> %s\n"
+                                        " <b>New TP:</b> %s (Adjusted to ST Line)\n"
                                         "⚡ <b>Reason:</b> Weakness Score = %d/4",
                                         _Symbol, ticket,
                                         DoubleToString(tp, _Digits),
@@ -3396,7 +3413,7 @@ int OnInit()
     g_eaStartTime = TimeCurrent();
     
     // --- 11. CONNECTION TEST
-    string testMsg = "🔔 EA Connection Test\nTesting Telegram notifications...";
+    string testMsg = " EA Connection Test\nTesting Telegram notifications...";
     SendTG(testMsg);
     
     // --- 1. ACTIVATION NOTIFICATION
@@ -3409,13 +3426,13 @@ int OnInit()
     
     string activationMsg = StringFormat(
                                         "✅ <b>Nodezilla101 EA Bot ACTIVATED</b>\n\n"
-                                        "📊 <b>Symbol:</b> %s\n"
+                                        " <b>Symbol:</b> %s\n"
                                         "⏰ <b>Timeframe:</b> %s\n"
-                                        "💼 <b>Main Strategy:</b> %s\n"
+                                        " <b>Main Strategy:</b> %s\n"
                                         "⚡ <b>Scalp Strategy:</b> %s\n"
-                                        "📈 <b>Trade TF:</b> %s\n"
-                                        "📉 <b>Scalp TF:</b> %s\n"
-                                        "🚫 <b>Max Positions:</b> %s\n\n"
+                                        " <b>Trade TF:</b> %s\n"
+                                        " <b>Scalp TF:</b> %s\n"
+                                        " <b>Max Positions:</b> %s\n\n"
                                         "<i>Monitoring for trading opportunities...</i>",
                                         _Symbol,
                                         tfstr(_Period), // Use the chart's current timeframe
@@ -3547,9 +3564,9 @@ void OnDeinit(const int reason)
     // --- 10. DEACTIVATION NOTIFICATION
     string deactivationMsg = StringFormat(
                                           "❌ <b>Nodezilla101 EA Bot DEACTIVATED</b>\n\n"
-                                          "📊 <b>Symbol:</b> %s\n"
+                                          " <b>Symbol:</b> %s\n"
                                           "⏰ <b>Timeframe:</b> %s\n"
-                                          "🔧 <b>Reason:</b> %s",
+                                          " <b>Reason:</b> %s",
                                           _Symbol,
                                           tfstr(_Period),
                                           GetDeinitReason(reason)
@@ -3610,7 +3627,7 @@ void SendPeriodReport(datetime fromTs, datetime toTs, const string label)
     double wrMain  = (mainN>0)  ? (100.0 * (double)mainW  / (double)mainN)  : 0.0;
     double wrScalp = (scalpN>0) ? (100.0 * (double)scalpW / (double)scalpN) : 0.0;
     
-    string hdr = StringFormat("📊 %s Report — %s", label, _Symbol);
+    string hdr = StringFormat(" %s Report — %s", label, _Symbol);
     
     // --- MODIFICATION START: Build format string separately ---
     string fmt = "[ %s\nPeriod: %s → %s\n\nTotal: %d trades | WinRate %.1f%% | Net %.2f\n";
@@ -3738,7 +3755,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         {
             long   dType   = (long)HistoryDealGetInteger(deal, DEAL_TYPE);
             string typeStr = (dType==DEAL_TYPE_BUY) ? "BUY" : "SELL";
-            string typeEmoji = (dType==DEAL_TYPE_BUY) ? "📈" : "📉";
+            string typeEmoji = (dType==DEAL_TYPE_BUY) ? "" : "";
             double entry   = HistoryDealGetDouble(deal, DEAL_PRICE);
             double lots    = HistoryDealGetDouble(deal, DEAL_VOLUME);
             string cmt     = (string)HistoryDealGetString(deal, DEAL_COMMENT);
@@ -3761,12 +3778,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             
             string execMsg = StringFormat(
                                           "✅ <b>TRADE EXECUTED</b>\n\n"
-                                          "📊 <b>Symbol:</b> %s\n"
+                                          " <b>Symbol:</b> %s\n"
                                           "%s <b>Type:</b> %s\n"
-                                          "💰 <b>Entry:</b> %s\n"
-                                          "📦 <b>Lots:</b> %.2f\n"
-                                          "🛑 <b>SL:</b> %s\n"
-                                          "🎯 <b>TP:</b> %s\n"
+                                          " <b>Entry:</b> %s\n"
+                                          " <b>Lots:</b> %.2f\n"
+                                          " <b>SL:</b> %s\n"
+                                          " <b>TP:</b> %s\n"
                                           "⚡ <b>Strategy:</b> %s",
                                           _Symbol, typeEmoji, typeStr, DoubleToString(entry, _Digits),
                                           lots, DoubleToString(sl, _Digits), DoubleToString(tp, _Digits), strat
@@ -3886,13 +3903,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             
             string closeMsg = StringFormat(
                                            "%s <b>POSITION CLOSED</b>\n\n"
-                                           "📊 <b>Symbol:</b> %s\n"
-                                           "🔢 <b>Ticket:</b> %I64u\n"
-                                           "📈 <b>Type:</b> %s\n"
-                                           "💬 <b>Comment:</b> %s\n\n"
+                                           " <b>Symbol:</b> %s\n"
+                                           " <b>Ticket:</b> %I64u\n"
+                                           " <b>Type:</b> %s\n"
+                                           " <b>Comment:</b> %s\n\n"
                                            "▶️ <b>Entry:</b> %s\n"
                                            "⏹️ <b>Exit:</b> %s\n"
-                                           "💰 <b>Profit/Loss:</b> %s%s%.2f\n\n"
+                                           " <b>Profit/Loss:</b> %s%s%.2f\n\n"
                                            "⚡ <b>Reason:</b> %s",
                                            net >= 0 ? "✅" : "❌",
                                            _Symbol,
@@ -3922,10 +3939,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                 string orderTypeStr = (trans.order_type == ORDER_TYPE_BUY_LIMIT) ? "Buy Limit" : "Sell Limit";
                 
                 string removeMsg = StringFormat(
-                                                "🔵 <b>PENDING ORDER REMOVED</b>\n\n"
-                                                "📊 <b>Symbol:</b> %s\n"
-                                                "🔵 <b>Type:</b> %s\n"
-                                                "💰 <b>Price:</b> %s\n"
+                                                " <b>PENDING ORDER REMOVED</b>\n\n"
+                                                " <b>Symbol:</b> %s\n"
+                                                " <b>Type:</b> %s\n"
+                                                " <b>Price:</b> %s\n"
                                                 "⚡ <b>Reason:</b> Order expired or was canceled.",
                                                 _Symbol,
                                                 orderTypeStr,
