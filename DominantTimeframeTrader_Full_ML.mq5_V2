@@ -132,6 +132,15 @@ double current_ATR_Trailing_Multiplier;
 double current_TP_RR;
 double current_RiskPercent;
 
+// +++ ADD THESE NEW LINES +++
+int    current_ADX_period;
+int    current_EMA_period;
+int    current_MACD_fast;
+int    current_MACD_slow;
+int    current_MACD_signal;
+int    current_ATR_period;
+// +++ END OF NEW LINES +++
+
 // Indicator handles storage
 struct TFHandles { int adx; int ema; int macd; int atr; };
 TFHandles handles_array[20];
@@ -377,14 +386,14 @@ bool EnsureHandles(int idx)
     }
     
     // Create indicators with error handling
-    handles_array[idx].adx = iADX(SYMBOL, tf, ADX_period);
+    handles_array[idx].adx = iADX(SYMBOL, tf, current_ADX_period);
     if(handles_array[idx].adx == INVALID_HANDLE)
     {
         PrintFormat("Failed to create ADX handle for TF %s", EnumToString(tf));
         return false;
     }
     
-    handles_array[idx].ema = iMA(SYMBOL, tf, EMA_period, 0, MODE_EMA, PRICE_CLOSE);
+    handles_array[idx].ema = iMA(SYMBOL, tf, current_EMA_period, 0, MODE_EMA, PRICE_CLOSE);
     if(handles_array[idx].ema == INVALID_HANDLE)
     {
         IndicatorRelease(handles_array[idx].adx);
@@ -393,7 +402,7 @@ bool EnsureHandles(int idx)
         return false;
     }
     
-    handles_array[idx].macd = iMACD(SYMBOL, tf, MACD_fast, MACD_slow, MACD_signal, PRICE_CLOSE);
+    handles_array[idx].macd = iMACD(SYMBOL, tf, current_MACD_fast, current_MACD_slow, current_MACD_signal, PRICE_CLOSE);
     if(handles_array[idx].macd == INVALID_HANDLE)
     {
         IndicatorRelease(handles_array[idx].adx);
@@ -404,7 +413,7 @@ bool EnsureHandles(int idx)
         return false;
     }
     
-    handles_array[idx].atr = iATR(SYMBOL, tf, ATR_period);
+    handles_array[idx].atr = iATR(SYMBOL, tf, current_ATR_period);
     if(handles_array[idx].atr == INVALID_HANDLE)
     {
         IndicatorRelease(handles_array[idx].adx);
@@ -1424,6 +1433,15 @@ int OnInit()
     current_ATR_Trailing_Multiplier = ATR_Trailing_Multiplier;
     current_TP_RR = TP_RR;
     current_RiskPercent = RiskPercent;
+
+// +++ ADD THESE NEW LINES +++
+    current_ADX_period    = ADX_period;
+    current_EMA_period    = EMA_period;
+    current_MACD_fast     = MACD_fast;
+    current_MACD_slow     = MACD_slow;
+    current_MACD_signal   = MACD_signal;
+    current_ATR_period    = ATR_period;
+    // +++ END OF NEW LINES +++
 
     // Initialize ML weights
     for(int t=0; t<TFs_to_monitor_count; t++)
