@@ -1,0 +1,1774 @@
+//+------------------------------------------------------------------+
+//| DominantTimeframeTrader_Full_ML.mq5                              |
+//| Expanded EA with dominant timeframe detection + ML classifier.   |
+//| Softmax multiclass logistic trained by SGD on historic labels.    |
+//| Author: ChatGPT (GPT-5 Thinking mini)                             |
+//+------------------------------------------------------------------+
+#property copyright "ChatGPT - GPT-5 Thinking mini"
+#property version   "3.00"
+#property strict
+
+#include <Trade/Trade.mqh>
+// Removed JAson.mqh include as it's not needed for basic Telegram functionality
+
+CTrade Trade;
+
+// --------------------------- Inputs --------------------------------
+// Telegram Settings
+input string   TelegramToken    = "YOUR_BOT_TOKEN";     // Telegram Bot Token
+input string   TelegramChatID   = "YOUR_CHAT_ID";       // Telegram Chat ID
+input bool     EnableTelegram   = true;                 // Enable Telegram notifications
+
+// Symbol & timeframes
+input string  InpSymbol                 = "";               // "" -> current symbol
+// --- Timeframes to monitor ---
+#define TF_COUNT 3
+const ENUM_TIMEFRAMES TF_list[TF_COUNT] = {PERIOD_H1, PERIOD_M30, PERIOD_M15};
+input int TFs_to_monitor_count = TF_COUNT;
+
+input int     ExecutionTF_offset        = 1;               // execution TF = dominant index + offset
+
+// ⚙️ Composite Volatility Index (CVI) settings
+input bool   Use_Composite_Volatility_Index = false;
+input string CVI_Symbols = "XAUUSD,EURUSD";  // comma-separated list
+input int    CVI_ATR_Short = 8;
+input int    CVI_ATR_Long  = 20;
+input double CVI_VolatilityScale = 5;  // overall influence multiplier
+
+// ⚠️ Equity-Curve Protection
+input bool   Use_EquityProtection     = true;
+input int    EquitySlope_Trades       = 18;       // number of trades to check slope
+input double MaxDrawdownPercent_Protect = 9.0;    // if equity drawdown > 8%
+input double MinMLConfidence_Protect  = 0.1;     // if avg confidence below this
+input int    PauseTrading_Bars        = 3;        // bars to pause after triggering protection
+
+// 📊 Market Regime Classifier
+input bool    Use_MarketRegime_Classifier = true;
+input int     Regime_ADX_Period           = 6;     // shorter-term ADX window
+input double  Regime_Trend_Threshold      = 5.0;   // ADX above = trending
+input double  Regime_Range_Threshold      = 6.0;   // ADX below = ranging
+input double  Regime_Volatility_Mult      = 1;    // ATR ratio for volatility regime
+input int     Regime_Smooth_Period        = 2;      // smoothing over bars
+
+// ⚙️ Dynamic Entry Mode Switching
+input bool   Use_Dynamic_Entry_Mode     = true;
+input double Breakout_Buffer_Pips       = 11;     // buffer above/below recent high/low
+input double Pullback_EMA_Percent       = 0.4;    // % retrace toward EMA to trigger limit entry
+input int    Entry_Lookback_Bars        = 1;      // bars for breakout high/low scan
+input double MinConfidence_Breakout     = 0.5;    // ML confidence required for breakout entries
+input double MinConfidence_Pullback     = 0.5;   // ML confidence required for pullback entries
+
+// Trend detection (rule-based)
+input double  ScoreThreshold            = 0.30;
+input int     ADX_period                = 6;
+input int     EMA_period                = 6;
+input int     MACD_fast                 = 13;
+input int     MACD_slow                 = 14;
+input int     MACD_signal               = 2;
+input int     ATR_period                = 9;
+input double  ADX_enter                 = 10.0;
+input double  ADX_exit                  = 7.0;
+input double  Min_EMA_slope             = 0.000015;
+input int     TrendConfirmBars          = 1;
+input int     ExhaustionConfirmBars     = 1;
+
+// Entries & risk
+input double  ATR_SL_multiplier         = 1.0;             // SL = ATR(dominant)*multiplier
+input double  TP_RR                     = 4.5;             // if >0 use R:R, else use ATR multiples
+input double  TP_ATR_multiplier         = 2.0;
+input bool    Use_RiskPercent           = true;
+input double  RiskPercent               = 2.0;             // percent of account per trade
+input double  FixedLots                 = 0.1;
+input double  MinLot                    = 0.01;
+input double  MaxLotPerTrade            = 5.0;
+input int     MaxConcurrentTrades       = 3;
+
+// Trade management (partial close, trailing, break-even)
+input bool    UsePartialClose           = true;
+input double  PartialClose1_Percent     = 0.5;  // 50% closed at TP1
+input double  PartialClose2_Percent     = 0.5;  // remaining closed at TP2 (if used)
+input double  TP1_RR                    = 1.0;  // first TP at 1R (SL * 1.0)
+input double  TP2_RR                    = 2.0;  // second TP at 2R
+input bool    UseATRTrailing            = true;
+input double  ATR_Trailing_Multiplier   = 2;  // trailing stop distance = ATR * multiplier
+input bool    UseBreakEven              = true;
+input double  BreakEvenAfterR           = 0.5;  // move SL to BE after price moves this many R
+
+// Sessions & safety
+input bool    UseSessionFilter          = false;
+input string  Session_Start             = "07:00"; // UTC session start allowed (HH:MM)
+input string  Session_End               = "22:00"; // UTC session end allowed
+input double  MaxDailyLossPercent       = 20.0;
+input double  MaxDrawdownPercent        = 30.0;   // account drawdown absolute stop
+input bool    UseNewsFilter             = false;  // placeholder - requires external news feed integration
+
+// Misc
+input int     Cooldown_bars             = 3;
+input double  ScoreMinDelta             = 0.02;
+input int     EA_magic                  = 20251029;
+input bool    AllowOppositeEntries      = false;  // allow trades opposite to dominant direction (not recommended)
+
+// ------------------------- ML inputs --------------------------------
+input bool    ML_ENABLED                = true;   // enable ML classifier
+input int     ML_HistoryBars            = 500;    // historical samples used for initial training
+input int     ML_Epochs                 = 30;     // training epochs at OnInit
+input double  ML_LearningRate           = 0.08;   // SGD learning rate
+input double  ML_RegLambda              = 0.0005; // L2 regularization
+input double  ML_FusionAlpha            = 0.10;   // alpha for fusion: final = alpha*rule + (1-alpha)*ml
+
+// ------------------------- Globals ----------------------------------
+string SYMBOL;
+int    currentDominantIndex = -1;
+int    cooldownRemaining = 0;
+datetime lastSmallTFBarTime = 0;
+double startOfDayBalance = 0.0;
+datetime startOfDay = 0;
+
+// Adaptive parameters (non-const versions of inputs)
+int current_ADX_enter;
+double current_ScoreThreshold;
+double current_ATR_SL_multiplier;
+double current_ATR_Trailing_Multiplier;
+double current_TP_RR;
+double current_RiskPercent;
+
+// Indicator handles storage
+struct TFHandles { int adx; int ema; int macd; int atr; };
+TFHandles handles_array[20];
+
+// ML model: weights[tf][feature] and bias[tf]
+int ML_features = 5; // ADX, EMA_slope, MACD_hist, ATR_norm, short_return
+double ML_weights[20][10]; // supports up to 20 TFs and up to 10 features
+double ML_bias[20];
+bool   ML_trained = false;
+
+#define ML_WEIGHT_FILE   "DominantTF_ML_Weights.bin"
+#define ML_BIAS_FILE     "DominantTF_ML_Bias.bin"
+double ml_conf_avg = 0.5;
+
+// 📊 Equity-Curve Protection variables
+double EquityHistory[100];  // store last N equity samples
+int EquityIndex = 0;
+bool TradingPaused = false;
+int PauseBarsRemaining = 0;
+
+// 🧠 Market Regime States
+enum MARKET_REGIME { REGIME_TRENDING, REGIME_RANGING, REGIME_VOLATILE, REGIME_UNKNOWN };
+MARKET_REGIME currentRegime = REGIME_UNKNOWN;
+MARKET_REGIME lastRegime = REGIME_UNKNOWN;
+double regimeScore = 0.0; // smooth score
+enum ENTRY_MODE { ENTRY_BREAKOUT, ENTRY_PULLBACK, ENTRY_DISABLED };
+ENTRY_MODE currentEntryMode = ENTRY_DISABLED;
+
+// ---------------------- Utility functions ---------------------------
+// Telegram notification function using WebRequest with correct parameters
+bool SendTelegramMessage(string message)
+{
+   if(!EnableTelegram || TelegramToken == "YOUR_BOT_TOKEN" || TelegramChatID == "YOUR_CHAT_ID")
+      return false;
+
+   string headers = "Content-Type: application/x-www-form-urlencoded";
+   char post[], result[];
+   string url = "https://api.telegram.org/bot" + TelegramToken + "/sendMessage";
+   string data = "chat_id=" + TelegramChatID + "&text=" + message + "&parse_mode=HTML";
+   
+   StringToCharArray(data, post, 0, StringLen(data));
+   
+   // Reset last error
+   ResetLastError();
+   
+   // Correct WebRequest call with proper parameters
+   int res = WebRequest("POST", url, headers, 5000, post, result, headers);
+   
+   if(res == 200) // HTTP status OK
+   {
+      Print("Telegram message sent successfully");
+      return true;
+   }
+   else
+   {
+      Print("Failed to send Telegram message. Error: ", GetLastError(), ", HTTP Result: ", res);
+      return false;
+   }
+}
+
+// Custom notification function to avoid conflict with built-in SendNotification
+void SendCustomNotification(string message, bool critical = false)
+{
+   // Always print to journal
+   PrintFormat("NOTIFICATION: %s", message);
+   
+   // Send to Telegram if enabled
+   if(EnableTelegram && critical)
+   {
+      // Add emoji and formatting for critical messages
+      string telegramMsg = "🚨 " + message + " 🚨";
+      SendTelegramMessage(telegramMsg);
+   }
+   else if(EnableTelegram)
+   {
+      SendTelegramMessage(message);
+   }
+   
+   // Also send to built-in notification for MT5 platform
+   if(critical)
+      ::SendNotification("CRITICAL: " + message);
+   else
+      ::SendNotification(message);
+}
+
+// Telegram alert for important trading events with formatted messages
+void SendTradeAlert(string message, string type = "INFO")
+{
+   string formattedMessage = "";
+   
+   if(type == "BUY")
+   {
+      formattedMessage =
+         "🟢 BUY SIGNAL 🟢\n\n" +
+         "📊 Symbol: " + SYMBOL + "\n" +
+         "💰 Entry Price: " + DoubleToString(SymbolInfoDouble(SYMBOL, SYMBOL_ASK), (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS)) + "\n" +
+         "⚡ Strategy: Dominant TF\n\n" +
+         message;
+   }
+   else if(type == "SELL")
+   {
+      formattedMessage =
+         "🔴 SELL SIGNAL 🔴\n\n" +
+         "📊 Symbol: " + SYMBOL + "\n" +
+         "💰 Entry Price: " + DoubleToString(SymbolInfoDouble(SYMBOL, SYMBOL_BID), (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS)) + "\n" +
+         "⚡ Strategy: Dominant TF\n\n" +
+         message;
+   }
+   else if(type == "TRADE_EXECUTED")
+   {
+      formattedMessage =
+         "✅ TRADE EXECUTED\n\n" +
+         "📊 Symbol: " + SYMBOL + "\n" +
+         message;
+   }
+   else if(type == "ORDER_CANCELED")
+   {
+      formattedMessage =
+         "🔵 PENDING ORDER CANCELED\n\n" +
+         "📊 Symbol: " + SYMBOL + "\n" +
+         "⚡ Reason: " + message;
+   }
+   else if(type == "WARNING")
+   {
+      formattedMessage = "⚠️ WARNING: " + message;
+   }
+   else if(type == "ERROR")
+   {
+      formattedMessage = "❌ ERROR: " + message;
+   }
+   else if(type == "SUCCESS")
+   {
+      formattedMessage = "✅ SUCCESS: " + message;
+   }
+   else
+   {
+      formattedMessage = "ℹ️ INFO: " + message;
+   }
+   
+   PrintFormat("TRADE ALERT: %s", message);
+   
+   if(EnableTelegram)
+   {
+      SendTelegramMessage(formattedMessage);
+   }
+}
+
+double AccountBase()
+{
+   return(AccountInfoDouble(ACCOUNT_BALANCE));
+}
+
+double NormalizeLot(double lots)
+{
+   double minlot = SymbolInfoDouble(SYMBOL, SYMBOL_VOLUME_MIN);
+   double lotstep = SymbolInfoDouble(SYMBOL, SYMBOL_VOLUME_STEP);
+   if(minlot <= 0) minlot = 0.01;
+   if(lotstep <= 0) lotstep = 0.01;
+   double l = MathMax(minlot, MathFloor(lots / lotstep) * lotstep);
+   return(l);
+}
+
+double ComputeLotSizeFromRisk(double slPoints)
+{
+   if(slPoints <= 0) return(0.0);
+   if(!Use_RiskPercent)
+      return(NormalizeLot(FixedLots));
+
+    // 📈 Confidence-weighted dynamic risk
+    double dynamicRisk = MathMin(3.0, MathMax(0.5, ml_conf_avg * 2.0)) * current_RiskPercent;
+    double risk_money = AccountBase() * (dynamicRisk / 100.0);
+    double point = SymbolInfoDouble(SYMBOL, SYMBOL_POINT);
+   double tickvalue = SymbolInfoDouble(SYMBOL, SYMBOL_TRADE_TICK_VALUE);
+   double ticksize  = SymbolInfoDouble(SYMBOL, SYMBOL_TRADE_TICK_SIZE);
+   if(ticksize == 0) ticksize = point;
+   double value_per_price = tickvalue / ticksize;
+   if(value_per_price <= 0) value_per_price = 1.0;
+   double sl_price_units = slPoints * point;
+   double lot = risk_money / (value_per_price * sl_price_units);
+   lot = MathMin(lot, MaxLotPerTrade);
+   lot = NormalizeLot(lot);
+   return(lot);
+}
+
+int TimeStringToMinutes(string s)
+{
+   int hh = 0, mm = 0;
+   if(StringLen(s) >= 4)
+   {
+      string parts[];
+      int cnt = StringSplit(s, ':', parts);
+      if(cnt >= 2) { hh = (int)StringToInteger(parts[0]); mm = (int)StringToInteger(parts[1]); }
+   }
+   return(hh*60 + mm);
+}
+
+bool IsWithinSession()
+{
+   if(!UseSessionFilter) return(true);
+   int startMin = TimeStringToMinutes(Session_Start);
+   int endMin = TimeStringToMinutes(Session_End);
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   int nowMin = dt.hour * 60 + dt.min;
+   if(startMin <= endMin) return(nowMin >= startMin && nowMin <= endMin);
+   return(nowMin >= startMin || nowMin <= endMin);
+}
+
+// ------------------- Indicator helpers -------------------------------
+bool EnsureHandles(int idx)
+{
+    if(idx < 0 || idx >= TFs_to_monitor_count)
+        return false;
+        
+    // If handles already exist, verify they're still valid
+    if(handles_array[idx].adx != 0 && handles_array[idx].adx != INVALID_HANDLE)
+    {
+        // Test if handle is still valid by trying to get data
+        double test[1];
+        if(CopyBuffer(handles_array[idx].adx, 0, 0, 1, test) > 0)
+            return true;
+        else
+        {
+            // Handle became invalid, recreate it
+            IndicatorRelease(handles_array[idx].adx);
+            IndicatorRelease(handles_array[idx].ema);
+            IndicatorRelease(handles_array[idx].macd);
+            IndicatorRelease(handles_array[idx].atr);
+            handles_array[idx].adx = 0;
+            handles_array[idx].ema = 0;
+            handles_array[idx].macd = 0;
+            handles_array[idx].atr = 0;
+        }
+    }
+    
+    ENUM_TIMEFRAMES tf = TF_list[idx];
+    
+    // Check if we have data for this timeframe
+    MqlRates rates_check[1];
+    if(CopyRates(SYMBOL, tf, 0, 1, rates_check) <= 0)
+    {
+        PrintFormat("No data for TF %s - cannot create indicators", EnumToString(tf));
+        return false;
+    }
+    
+    // Create indicators with error handling
+    handles_array[idx].adx = iADX(SYMBOL, tf, ADX_period);
+    if(handles_array[idx].adx == INVALID_HANDLE)
+    {
+        PrintFormat("Failed to create ADX handle for TF %s", EnumToString(tf));
+        return false;
+    }
+    
+    handles_array[idx].ema = iMA(SYMBOL, tf, EMA_period, 0, MODE_EMA, PRICE_CLOSE);
+    if(handles_array[idx].ema == INVALID_HANDLE)
+    {
+        IndicatorRelease(handles_array[idx].adx);
+        handles_array[idx].adx = 0;
+        PrintFormat("Failed to create EMA handle for TF %s", EnumToString(tf));
+        return false;
+    }
+    
+    handles_array[idx].macd = iMACD(SYMBOL, tf, MACD_fast, MACD_slow, MACD_signal, PRICE_CLOSE);
+    if(handles_array[idx].macd == INVALID_HANDLE)
+    {
+        IndicatorRelease(handles_array[idx].adx);
+        IndicatorRelease(handles_array[idx].ema);
+        handles_array[idx].adx = 0;
+        handles_array[idx].ema = 0;
+        PrintFormat("Failed to create MACD handle for TF %s", EnumToString(tf));
+        return false;
+    }
+    
+    handles_array[idx].atr = iATR(SYMBOL, tf, ATR_period);
+    if(handles_array[idx].atr == INVALID_HANDLE)
+    {
+        IndicatorRelease(handles_array[idx].adx);
+        IndicatorRelease(handles_array[idx].ema);
+        IndicatorRelease(handles_array[idx].macd);
+        handles_array[idx].adx = 0;
+        handles_array[idx].ema = 0;
+        handles_array[idx].macd = 0;
+        PrintFormat("Failed to create ATR handle for TF %s", EnumToString(tf));
+        return false;
+    }
+    
+    // Small delay to allow indicator buffers to initialize
+    Sleep(50);
+    
+    return true;
+}
+bool GetIndicators(int idx, double &adx, double &ema_slope, double &macd_hist, double &atr)
+{
+    if(idx < 0 || idx >= TFs_to_monitor_count)
+    {
+        PrintFormat("Invalid index in GetIndicators: %d", idx);
+        return false;
+    }
+    
+    ENUM_TIMEFRAMES tf = TF_list[idx];
+    
+    // First, check if we have data for this timeframe
+    MqlRates test_rates[];
+    int available_bars = CopyRates(SYMBOL, tf, 0, 1, test_rates);
+    if(available_bars <= 0)
+    {
+        PrintFormat("No data available for %s on TF %s - skipping", SYMBOL, EnumToString(tf));
+        return false;
+    }
+    
+    if(!EnsureHandles(idx))
+    {
+        PrintFormat("EnsureHandles failed for idx=%d, TF=%s", idx, EnumToString(tf));
+        return false;
+    }
+    
+    // Get ADX with error handling
+    double arr_adx[1];
+    int adx_copied = CopyBuffer(handles_array[idx].adx, 0, 0, 1, arr_adx);
+    if(adx_copied <= 0)
+    {
+        int error = GetLastError();
+        // If it's a data availability error, don't spam the log
+        if(error != 4806 && error != 4807)
+        {
+            PrintFormat("CopyBuffer ADX failed for TF %s. Error: %d", EnumToString(tf), error);
+        }
+        return false;
+    }
+    adx = arr_adx[0];
+
+    // Get EMA for slope calculation
+    double arr_ema[4]; // Need 4 bars for slope calculation
+    int ema_copied = CopyBuffer(handles_array[idx].ema, 0, 0, 4, arr_ema);
+    if(ema_copied <= 0)
+    {
+        int error = GetLastError();
+        if(error != 4806 && error != 4807)
+        {
+            PrintFormat("CopyBuffer EMA failed for TF %s. Error: %d", EnumToString(tf), error);
+        }
+        return false;
+    }
+    
+    double ema_now = arr_ema[0];
+    double ema_past = arr_ema[3]; // Use 3 bars back for slope
+    ema_slope = 0.0;
+    if(ema_now != 0.0)
+        ema_slope = (ema_now - ema_past) / ema_now;
+
+    // Get MACD - try buffer 2 first, fallback to manual calculation
+    double arr_macd_main[1], arr_macd_signal[1], arr_macd_hist[1];
+    bool macd_ok = false;
+    
+    // First try to get histogram directly from buffer 2
+    int hist_copied = CopyBuffer(handles_array[idx].macd, 2, 0, 1, arr_macd_hist);
+    if(hist_copied > 0)
+    {
+        macd_hist = arr_macd_hist[0];
+        macd_ok = true;
+    }
+    else
+    {
+        // Fallback: calculate histogram from main and signal
+        int main_copied = CopyBuffer(handles_array[idx].macd, 0, 0, 1, arr_macd_main);
+        int signal_copied = CopyBuffer(handles_array[idx].macd, 1, 0, 1, arr_macd_signal);
+        
+        if(main_copied > 0 && signal_copied > 0)
+        {
+            macd_hist = arr_macd_main[0] - arr_macd_signal[0];
+            macd_ok = true;
+        }
+        else
+        {
+            macd_hist = 0.0;
+            macd_ok = false;
+        }
+    }
+
+    // Get ATR
+    double arr_atr[1];
+    int atr_copied = CopyBuffer(handles_array[idx].atr, 0, 0, 1, arr_atr);
+    if(atr_copied <= 0)
+    {
+        int error = GetLastError();
+        if(error != 4806 && error != 4807)
+        {
+            PrintFormat("CopyBuffer ATR failed for TF %s. Error: %d", EnumToString(tf), error);
+        }
+        return false;
+    }
+    atr = arr_atr[0];
+
+    return true;
+}
+// Score (0..1)
+double ComputeScore(double adx, double ema_slope, double macd_hist, double price)
+{
+    double adx_score = MathMin(adx / 50.0, 1.0);
+    double slope_score = MathMin(MathAbs(ema_slope) / 0.01, 1.0);
+    
+    // FIXED: Handle zero or very small MACD values
+    double macd_abs = MathAbs(macd_hist);
+    double momentum_score = 0.0;
+    if(macd_abs > 0 && price > 0)
+    {
+        momentum_score = MathMin(macd_abs / MathMax(0.0001, price*0.001), 1.0);
+    }
+    
+    double score = 0.5 * adx_score + 0.35 * slope_score + 0.15 * momentum_score;
+    score = MathMax(0.0, MathMin(1.0, score));
+    return(score);
+}
+
+bool CheckExhaustion(int idx)
+{
+   double adx, ema_slope, macd_hist, atr;
+   if(!GetIndicators(idx, adx, ema_slope, macd_hist, atr)) return(false);
+   if(adx <= ADX_exit) return(true);
+   if(MathAbs(ema_slope) < Min_EMA_slope) return(true);
+
+   double ema_val_arr[];
+   if(CopyBuffer(handles_array[idx].ema, 0, 0, 1, ema_val_arr) > 0)
+   {
+      double lastEMA = ema_val_arr[0];
+      MqlRates r[];
+      if(CopyRates(SYMBOL, TF_list[idx], 0, 1, r) > 0)
+      {
+         double lastClose = r[0].close;
+         if(ema_slope > 0 && lastClose < lastEMA) return(true);
+         if(ema_slope < 0 && lastClose > lastEMA) return(true);
+      }
+   }
+   return(false);
+}
+
+// ------------------------ ML helpers --------------------------------
+// Extract the same features for ML as used by rule-based system.
+// returns array of length ML_features
+bool ExtractFeaturesForML(int idx, double &features[])
+{
+   double adx, ema_slope, macd_hist, atr;
+   if(!GetIndicators(idx, adx, ema_slope, macd_hist, atr)) return(false);
+
+   // feature 0: normalized ADX (adx/100)
+   features[0] = adx / 100.0;
+   // feature 1: ema_slope (already small) - keep
+   features[1] = ema_slope;
+   // feature 2: macd_hist normalized by price (macro)
+   MqlRates r[];
+   if(CopyRates(SYMBOL, TF_list[idx], 0, 1, r) <= 0) return(false);
+   double price = r[0].close;
+   features[2] = macd_hist / MathMax(0.0001, price);
+   // feature 3: atr relative (atr / price)
+   features[3] = atr / MathMax(0.0001, price);
+   // feature 4: short return (close/current vs close N bars ago) using 1 bar of that TF
+   MqlRates hist[];
+   if(CopyRates(SYMBOL, TF_list[idx], 1, 2, hist) <= 0) { features[4] = 0.0; }
+   else
+   {
+      double prevClose = hist[1].close;
+      features[4] = (price - prevClose) / MathMax(0.0001, prevClose);
+   }
+   return(true);
+}
+
+// Softmax helper
+void SoftmaxArray(double &in[], int n, double &out[])
+{
+   double maxv = in[0];
+   for(int i=1;i<n;i++) if(in[i] > maxv) maxv = in[i];
+   double s = 0.0;
+   for(int i=0;i<n;i++) { out[i] = MathExp(in[i] - maxv); s += out[i]; }
+   if(s==0) s = 1e-12;
+   for(int i=0;i<n;i++) out[i] /= s;
+}
+
+// Predict probabilities using current ML weights for current moment
+bool ML_PredictProbabilities(double &probs[])
+{
+   if(!ML_ENABLED || !ML_trained) return(false);
+   double logits[20];
+   for(int i=0;i<TFs_to_monitor_count;i++) logits[i] = ML_bias[i];
+   // for each TF compute features and dot product
+   double feat[10];
+   for(int i=0;i<TFs_to_monitor_count;i++)
+   {
+      if(!ExtractFeaturesForML(i, feat)) return(false);
+      double sum = ML_bias[i];
+      for(int f=0; f<ML_features; f++) sum += ML_weights[i][f] * feat[f];
+      logits[i] = sum;
+   }
+   SoftmaxArray(logits, TFs_to_monitor_count, probs);
+   return(true);
+}
+
+// Online SGD update when we have a confirmed label y (one-hot) and feature vector x (for time t)
+void ML_OnlineUpdate(double &x[], int y_label)
+{
+   if(!ML_ENABLED) return;
+   // compute logits and softmax
+   double logits[20];
+   for(int i=0;i<TFs_to_monitor_count;i++)
+   {
+      double s = ML_bias[i];
+      for(int f=0; f<ML_features; f++) s += ML_weights[i][f] * x[f];
+      logits[i] = s;
+   }
+   double probs[20];
+   SoftmaxArray(logits, TFs_to_monitor_count, probs);
+   // gradient for cross-entropy: grad = prob - y
+   for(int k=0;k<TFs_to_monitor_count;k++)
+   {
+      double error = probs[k] - (k==y_label ? 1.0 : 0.0);
+      // update bias
+      ML_bias[k] -= ML_LearningRate * (error + ML_RegLambda * ML_bias[k]);
+      for(int f=0; f<ML_features; f++)
+      {
+         ML_weights[k][f] -= ML_LearningRate * (error * x[f] + ML_RegLambda * ML_weights[k][f]);
+      }
+   }
+}
+
+// Build training set from history using rule-based scoring as label
+bool ML_BuildTrainingAndTrain()
+{
+   if(!ML_ENABLED) return(false);
+   int samplesNeeded = ML_HistoryBars;
+   // We'll sample 'time instants' aligned to the smallest TF bar times
+   ENUM_TIMEFRAMES smallestTF = TF_list[TFs_to_monitor_count - 1];
+   // Get rates for smallest TF
+   MqlRates rates[];
+   int copied = CopyRates(SYMBOL, smallestTF, 1, samplesNeeded+10, rates); // offset=1 skip current incomplete bar
+   if(copied <= 0) {
+      Print("ML: not enough history on smallest TF.");
+      SendCustomNotification("ML Training: Not enough historical data available", true);
+      return(false);
+   }
+
+   // Prepare X and y arrays as MQL friendly vectors (we'll store in dynamic arrays)
+   // For each sample i we compute features for each TF and then find rule-based best TF index -> label.
+   int sampleCount = MathMin(samplesNeeded, copied-1);
+   // Temporary containers
+   // We'll perform SGD training online to avoid storing massive arrays
+   // initialize weights small random
+   for(int t=0;t<TFs_to_monitor_count;t++)
+   {
+      ML_bias[t] = 0.0;
+      for(int f=0; f<ML_features; f++) ML_weights[t][f] = 0.0;
+   }
+   // Simple random initialization to break symmetry
+   long seed = TimeCurrent() % 1000; // Fixed: explicit cast to long
+
+   for(int t=0;t<TFs_to_monitor_count;t++)
+      for(int f=0; f<ML_features; f++) ML_weights[t][f] = 0.001 * (MathSin((double)seed + t*7 + f*11));
+
+   PrintFormat("ML: Building training from %d samples and training %d epochs ...", sampleCount, ML_Epochs);
+   SendCustomNotification(StringFormat("ML Training Started: %d samples, %d epochs", sampleCount, ML_Epochs));
+
+   // For each epoch do SGD pass through samples (randomize order)
+   for(int epoch=0; epoch<ML_Epochs; epoch++)
+   {
+      for(int s=0; s<sampleCount; s++)
+      {
+         // time align: use rates[s+1].time as the reference moment
+         datetime ttime = rates[s+1].time;
+         // compute features for each TF and compute rule score to determine label
+         double scores[20]; for(int k=0;k<TFs_to_monitor_count;k++) scores[k] = 0.0;
+         double feat_i[10];
+         for(int k=0;k<TFs_to_monitor_count;k++)
+         {
+            // To compute features at that exact time, we copy indicator values using time offset where possible.
+            // Simpler and efficient: we will temporarily shift symbol time context by using CopyBuffer with offset 1 for that TF.
+            // However CopyBuffer offset referencing is valid. We'll call GetIndicators but with CopyBuffer offsets equivalent to 1 bar back.
+            // We'll approximate by using current indicators (works acceptably for training since many bars).
+            if(!ExtractFeaturesForML(k, feat_i)) { /*ignore*/ }
+            // compute a rule-based score using available indicators (approx)
+            double adx, ema_slope, macd_hist, atr;
+            if(!GetIndicators(k, adx, ema_slope, macd_hist, atr)) { adx=0; ema_slope=0; macd_hist=0; atr=0; }
+            MqlRates rtemp[];
+            double price = 0.0;
+            if(CopyRates(SYMBOL, TF_list[k], 0, 1, rtemp) > 0) price = rtemp[0].close;
+            double sc = ComputeScore(adx, ema_slope, macd_hist, price);
+            scores[k] = sc;
+         }
+         // label is argmax of rule score
+         int label = 0;
+         double best = scores[0];
+         for(int k=1;k<TFs_to_monitor_count;k++) if(scores[k] > best) { best = scores[k]; label = k; }
+         // Now create x vector from features of each TF? We want features of entire moment, but softmax will operate per TF.
+         // For online SGD update we need one feature vector per TF; here we pick the features for the label TF.
+         if(!ExtractFeaturesForML(label, feat_i)) continue;
+         // apply online update with that x and label
+         ML_OnlineUpdate(feat_i, label);
+      }
+      // optional: decay learning rate slightly
+      // ML_LearningRate *= 0.995;
+   }
+   ML_trained = true;
+   Print("ML training complete.");
+   SendCustomNotification("ML Training Completed Successfully", true);
+   return(true);
+}
+
+bool SaveMLWeights()
+{
+    int handle = FileOpen(ML_WEIGHT_FILE, FILE_WRITE|FILE_BIN);
+    if(handle == INVALID_HANDLE) {
+        SendCustomNotification("ML: Failed to save weights file", true);
+        return(false);
+    }
+    FileWriteArray(handle, ML_weights, 0, TFs_to_monitor_count*ML_features);
+    FileClose(handle);
+    int handle2 = FileOpen(ML_BIAS_FILE, FILE_WRITE|FILE_BIN);
+    if(handle2 != INVALID_HANDLE) { FileWriteArray(handle2, ML_bias, 0, TFs_to_monitor_count); FileClose(handle2); }
+    SendCustomNotification("ML Weights Saved Successfully");
+    return(true);
+}
+
+bool LoadMLWeights()
+{
+    int handle = FileOpen(ML_WEIGHT_FILE, FILE_READ|FILE_BIN);
+    if(handle == INVALID_HANDLE) return(false);
+    FileReadArray(handle, ML_weights, 0, TFs_to_monitor_count*ML_features);
+    FileClose(handle);
+    int handle2 = FileOpen(ML_BIAS_FILE, FILE_READ|FILE_BIN);
+    if(handle2 != INVALID_HANDLE) { FileReadArray(handle2, ML_bias, 0, TFs_to_monitor_count); FileClose(handle2); }
+    ML_trained = true;
+    SendCustomNotification("ML Weights Loaded Successfully");
+    return(true);
+}
+
+// 🔄 Compute Composite Volatility Index (average ATR ratio across listed symbols)
+double ComputeCompositeVolatilityIndex()
+{
+    if(!Use_Composite_Volatility_Index) return(1.0);
+    string pairs[];
+    int count = StringSplit(CVI_Symbols, ',', pairs);
+    if(count <= 0) return(1.0);
+
+    double sum_ratio = 0.0;
+    int valid = 0;
+    for(int i=0; i<count; i++)
+    {
+        string sym = pairs[i];
+        // Manual string trimming
+        while(StringGetCharacter(sym, 0) == ' ') sym = StringSubstr(sym, 1);
+        while(StringGetCharacter(sym, StringLen(sym)-1) == ' ') sym = StringSubstr(sym, 0, StringLen(sym)-1);
+        
+        if(!SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE)) continue; // skip if invalid
+        
+        int atr_short_handle = iATR(sym, PERIOD_D1, CVI_ATR_Short);
+        int atr_long_handle = iATR(sym, PERIOD_D1, CVI_ATR_Long);
+        
+        double atr_short_buf[], atr_long_buf[];
+        if(CopyBuffer(atr_short_handle, 0, 0, 1, atr_short_buf) <= 0) continue;
+        if(CopyBuffer(atr_long_handle, 0, 0, 1, atr_long_buf) <= 0) continue;
+        
+        double atr_short = atr_short_buf[0];
+        double atr_long = atr_long_buf[0];
+        if(atr_short <= 0 || atr_long <= 0) continue;
+        
+        double ratio = atr_short / atr_long;
+        sum_ratio += ratio;
+        valid++;
+        
+        IndicatorRelease(atr_short_handle);
+        IndicatorRelease(atr_long_handle);
+    }
+    if(valid == 0) return(1.0);
+    double avg_ratio = sum_ratio / valid;
+    return(avg_ratio);
+}
+
+// 🧮 Market Regime Classifier: determines market state based on ADX, ATR, Bollinger width
+MARKET_REGIME DetectMarketRegime(ENUM_TIMEFRAMES tf)
+{
+    if(!Use_MarketRegime_Classifier) return(REGIME_UNKNOWN);
+
+    // --- Indicators ---
+    int adx_handle = iADX(SYMBOL, tf, Regime_ADX_Period);
+    int atr_handle = iATR(SYMBOL, tf, 14);
+    int bb_handle  = iBands(SYMBOL, tf, 20, 2.0, 0, PRICE_CLOSE);
+
+    double adx_buf[], atr_buf[], bb_upper[], bb_lower[];
+    if(CopyBuffer(adx_handle, 0, 0, Regime_Smooth_Period, adx_buf) <= 0) return(REGIME_UNKNOWN);
+    if(CopyBuffer(atr_handle, 0, 0, Regime_Smooth_Period, atr_buf) <= 0) return(REGIME_UNKNOWN);
+    if(CopyBuffer(bb_handle, 0, 0, Regime_Smooth_Period, bb_upper) <= 0) return(REGIME_UNKNOWN);
+    if(CopyBuffer(bb_handle, 2, 0, Regime_Smooth_Period, bb_lower) <= 0) return(REGIME_UNKNOWN);
+
+    double adx_avg = 0.0, atr_now = 0.0;
+    for(int i=0; i<Regime_Smooth_Period; i++) adx_avg += adx_buf[i];
+    adx_avg /= Regime_Smooth_Period;
+    atr_now = atr_buf[0];
+
+    // --- ATR regime detection ---
+    int atr_short_handle = iATR(SYMBOL, tf, 14);
+    int atr_long_handle = iATR(SYMBOL, tf, 100);
+    double atr_short_buf[], atr_long_buf[];
+    double atr_short = 0, atr_long = 0;
+    if(CopyBuffer(atr_short_handle, 0, 0, 1, atr_short_buf) > 0) atr_short = atr_short_buf[0];
+    if(CopyBuffer(atr_long_handle, 0, 0, 1, atr_long_buf) > 0) atr_long = atr_long_buf[0];
+    double vol_ratio = (atr_long > 0) ? atr_short / atr_long : 1.0;
+
+    IndicatorRelease(atr_short_handle);
+    IndicatorRelease(atr_long_handle);
+
+    // --- Bollinger width (range compression indicator) ---
+    double bb_width = MathAbs(bb_upper[0] - bb_lower[0]);
+    double price = SymbolInfoDouble(SYMBOL, SYMBOL_BID);
+    double bb_rel = (price > 0) ? bb_width / price : 0.0;
+
+    // --- Determine regime ---
+    MARKET_REGIME regime = REGIME_UNKNOWN;
+    if(adx_avg >= Regime_Trend_Threshold && vol_ratio < Regime_Volatility_Mult)
+        regime = REGIME_TRENDING;
+    else if(adx_avg < Regime_Range_Threshold && vol_ratio < Regime_Volatility_Mult)
+        regime = REGIME_RANGING;
+    else if(vol_ratio >= Regime_Volatility_Mult)
+        regime = REGIME_VOLATILE;
+
+    IndicatorRelease(adx_handle);
+    IndicatorRelease(atr_handle);
+    IndicatorRelease(bb_handle);
+
+    return(regime);
+}
+
+// 📈 Breakout entry check (above/below recent highs/lows)
+bool CheckBreakoutSignal(int dir, ENUM_TIMEFRAMES tf)
+{
+    int lookback = Entry_Lookback_Bars;
+    double highs[], lows[];
+    if(CopyHigh(SYMBOL, tf, 1, lookback, highs) <= 0) return(false);
+    if(CopyLow(SYMBOL, tf, 1, lookback, lows) <= 0) return(false);
+
+    int high_index = ArrayMaximum(highs, 0, lookback);
+    int low_index = ArrayMinimum(lows, 0, lookback);
+    double recentHigh = highs[high_index];
+    double recentLow  = lows[low_index];
+
+    double price = (dir==1) ? SymbolInfoDouble(SYMBOL, SYMBOL_ASK)
+                            : SymbolInfoDouble(SYMBOL, SYMBOL_BID);
+    double point = SymbolInfoDouble(SYMBOL, SYMBOL_POINT);
+    double buffer = Breakout_Buffer_Pips * point;
+
+    if(dir==1 && price > recentHigh + buffer) return(true);
+    if(dir==-1 && price < recentLow  - buffer) return(true);
+
+    return(false);
+}
+
+// 📉 Pullback entry check (price retraces toward EMA)
+bool CheckPullbackSignal(int dir, ENUM_TIMEFRAMES tf)
+{
+    int ema_period = 20;
+    int ema_handle = iMA(SYMBOL, tf, ema_period, 0, MODE_EMA, PRICE_CLOSE);
+    double ema_buf[];
+    if(CopyBuffer(ema_handle, 0, 0, 3, ema_buf) <= 0) return(false);
+    double ema_val = ema_buf[0];
+
+    double price = SymbolInfoDouble(SYMBOL, SYMBOL_BID);
+    double point = SymbolInfoDouble(SYMBOL, SYMBOL_POINT);
+    double retrace_dist = MathAbs(price - ema_val);
+
+    // Compute retrace threshold relative to EMA
+    double retrace_threshold = ema_val * (Pullback_EMA_Percent / 100.0);
+    bool valid = false;
+    if(dir==1 && price <= ema_val + retrace_threshold) valid = true;
+    if(dir==-1 && price >= ema_val - retrace_threshold) valid = true;
+
+    IndicatorRelease(ema_handle);
+    return(valid);
+}
+
+// 🧭 Decide entry mode based on current regime & ML confidence
+ENTRY_MODE DecideEntryMode()
+{
+    if(!Use_Dynamic_Entry_Mode) return(ENTRY_BREAKOUT);
+
+    if(currentRegime == REGIME_TRENDING && ml_conf_avg >= MinConfidence_Breakout)
+        return(ENTRY_BREAKOUT);
+
+    if(currentRegime == REGIME_RANGING && ml_conf_avg >= MinConfidence_Pullback)
+        return(ENTRY_PULLBACK);
+
+    if(currentRegime == REGIME_VOLATILE || ml_conf_avg < 0.4)
+        return(ENTRY_DISABLED);
+
+    return(ENTRY_BREAKOUT);
+}
+
+// 📈 Compute slope of last N equity samples (simple linear regression)
+double ComputeEquitySlope(int lookback)
+{
+    int n = MathMin(lookback, ArraySize(EquityHistory));
+    if(n < 3) return 0.0;
+    double sumx=0, sumy=0, sumxy=0, sumxx=0;
+    for(int i=0; i<n; i++)
+    {
+        sumx += i;
+        sumy += EquityHistory[i];
+        sumxy += i * EquityHistory[i];
+        sumxx += i * i;
+    }
+    double slope = (n * sumxy - sumx * sumy) / MathMax(1.0, (n * sumxx - sumx * sumx));
+    return slope;
+}
+
+// ---------------------- Dominant TF evaluation -------------------------
+void EvaluateDominantTFWithFusion()
+{
+   if(cooldownRemaining > 0) return;
+   double bestScore = -1.0, secondBest = -1.0;
+   int bestIdx = -1;
+   // compute rule-based scores
+   double rule_scores[20];
+   for(int i=0;i<TFs_to_monitor_count;i++) rule_scores[i] = 0.0;
+   for(int i=0;i<TFs_to_monitor_count;i++)
+   {
+      double adx, ema_slope, macd_hist, atr;
+      if(!GetIndicators(i, adx, ema_slope, macd_hist, atr)) continue;
+      MqlRates r[];
+      if(CopyRates(SYMBOL, TF_list[i], 0, 1, r) <= 0) continue;
+      double price = r[0].close;
+      double score = ComputeScore(adx, ema_slope, macd_hist, price);
+      // trend confirmation penalty
+      int trendBars = 0;
+      for(int b=0;b<TrendConfirmBars;b++)
+      {
+         double arr[];
+         if(CopyBuffer(handles_array[i].adx, 0, b, 1, arr) > 0)
+         {
+            if(arr[0] >= current_ADX_enter) trendBars++;
+         }
+      }
+      if(trendBars < TrendConfirmBars) score *= 0.7;
+      rule_scores[i] = score;
+   }
+
+   // ML probabilities
+   double ml_probs[20];
+   bool ml_ok = ML_PredictProbabilities(ml_probs);
+    
+    // --- DEBUG: show rule scores and ML probs ---
+    double debug_rule_max = -1.0;
+    int dbg_best_rule_idx = -1;
+    for(int i=0;i<TFs_to_monitor_count;i++)
+    {
+        if(rule_scores[i] > debug_rule_max) { debug_rule_max = rule_scores[i]; dbg_best_rule_idx = i; }
+    }
+
+    // compute ml probs if available
+    double debug_ml_probs[20];
+    bool debug_ml_ok = ML_PredictProbabilities(debug_ml_probs);
+
+    // Show a compact table: idx|rule|mlprob|fused
+    string s = "DEBUG Scores: ";
+    for(int i=0;i<TFs_to_monitor_count;i++)
+    {
+        double fused = rule_scores[i];
+        if(ML_ENABLED && debug_ml_ok) fused = ML_FusionAlpha * rule_scores[i] + (1.0 - ML_FusionAlpha) * debug_ml_probs[i];
+        s += StringFormat("[%d r=%.3f ml=%.3f f=%.3f] ", i, rule_scores[i], debug_ml_ok ? debug_ml_probs[i] : 0.0, fused);
+    }
+    Print(s);
+
+    // If best fused score too low, print why
+    double tmp_best = -1.0, tmp_second = -1.0; int tmp_best_idx=-1;
+    for(int i=0;i<TFs_to_monitor_count;i++)
+    {
+        double fused = rule_scores[i];
+        if(ML_ENABLED && debug_ml_ok) fused = ML_FusionAlpha * rule_scores[i] + (1.0 - ML_FusionAlpha) * debug_ml_probs[i];
+        if(fused > tmp_best) { tmp_second = tmp_best; tmp_best = fused; tmp_best_idx = i; }
+        else if(fused > tmp_second) tmp_second = fused;
+    }
+    if(tmp_best < ScoreThreshold || (tmp_best - tmp_second) < ScoreMinDelta)
+    {
+        PrintFormat("DEBUG: no dominant selected -> bestIdx=%d best=%.3f second=%.3f ScoreThreshold=%.3f MinDelta=%.3f",
+                    tmp_best_idx, tmp_best, tmp_second, ScoreThreshold, ScoreMinDelta);
+    }
+
+   // fused scores
+   for(int i=0;i<TFs_to_monitor_count;i++)
+   {
+      double fused = rule_scores[i];
+      if(ML_ENABLED && ml_ok) fused = ML_FusionAlpha * rule_scores[i] + (1.0 - ML_FusionAlpha) * ml_probs[i];
+      // track best
+      if(fused > bestScore) { secondBest = bestScore; bestScore = fused; bestIdx = i; }
+      else if(fused > secondBest) secondBest = fused;
+   }
+
+   if(bestIdx >= 0 && bestScore >= current_ScoreThreshold && (bestScore - secondBest) >= ScoreMinDelta)
+   {
+      if(currentDominantIndex != bestIdx)
+      {
+         currentDominantIndex = bestIdx;
+         lastSmallTFBarTime = TimeCurrent();
+         string message = StringFormat("New dominant TF selected (fused): idx=%d TF=%d fused_score=%.3f rule=%.3f ml=%.3f",
+                     bestIdx, (int)TF_list[bestIdx], bestScore, rule_scores[bestIdx],
+                     (ML_ENABLED && ML_trained) ? (ML_PredictProbabilities(ml_probs) ? ml_probs[bestIdx] : 0.0) : 0.0);
+         PrintFormat(message);
+         SendCustomNotification(message, true);
+      }
+   }
+   else
+   {
+      if(currentDominantIndex != -1)
+      {
+         Print("No dominant TF currently.");
+         SendCustomNotification("No dominant TF currently - market conditions unclear");
+         currentDominantIndex = -1;
+      }
+   }
+}
+
+// -------------------- Entry & Order helpers --------------------------
+int CountOpenPositionsForMagic()
+{
+   int cnt = 0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetInteger(POSITION_MAGIC) == EA_magic && PositionGetString(POSITION_SYMBOL) == SYMBOL) cnt++;
+      }
+   }
+   return(cnt);
+}
+
+void PlaceMarketOrder(int dir, double lots, double sl, double tp)
+{
+   MqlTradeRequest req; MqlTradeResult res;
+   ZeroMemory(req); ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = SYMBOL;
+   req.volume = lots;
+   req.type = (dir==1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   req.price = (dir==1) ? SymbolInfoDouble(SYMBOL, SYMBOL_ASK) : SymbolInfoDouble(SYMBOL, SYMBOL_BID);
+   req.sl = sl;
+   req.tp = tp;
+   req.deviation = 20;
+   req.magic = EA_magic;
+   req.type_filling = ORDER_FILLING_FOK;
+   if(!OrderSend(req, res))
+   {
+      string errorMsg = StringFormat("OrderSend failed ret=%d comment=%s", GetLastError(), res.comment);
+      PrintFormat(errorMsg);
+      SendTradeAlert(errorMsg, "ERROR");
+   }
+   else
+   {
+      string successMsg = StringFormat("Type: %s\n💰 Entry: %.5f\n📦 Lots: %.2f\n🛑 SL: %.5f\n🎯 TP: %.5f",
+                                       (dir==1) ? "BUY" : "SELL",
+                                       req.price, lots, sl, tp);
+      PrintFormat("OrderSend success: ticket=%I64u vol=%.2f type=%d sl=%.5f tp=%.5f", res.order, lots, req.type, req.sl, req.tp);
+      SendTradeAlert(successMsg, (dir==1) ? "BUY" : "SELL");
+   }
+}
+
+// Partial close
+void PartialClosePosition(ulong ticket, double percent)
+{
+   if(percent <= 0 || percent > 1) return;
+   if(!PositionSelectByTicket(ticket)) return;
+   string sym = PositionGetString(POSITION_SYMBOL);
+   long type = PositionGetInteger(POSITION_TYPE);
+   double vol = PositionGetDouble(POSITION_VOLUME);
+   double close_vol = vol * percent;
+   close_vol = NormalizeLot(close_vol);
+   if(close_vol < SymbolInfoDouble(SYMBOL, SYMBOL_VOLUME_MIN)) return;
+
+   MqlTradeRequest req; MqlTradeResult res;
+   ZeroMemory(req); ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = sym;
+   req.volume = close_vol;
+   req.type = (type==POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   req.price = (req.type==ORDER_TYPE_BUY) ? SymbolInfoDouble(SYMBOL, SYMBOL_ASK) : SymbolInfoDouble(SYMBOL, SYMBOL_BID);
+   req.deviation = 20;
+   req.magic = EA_magic;
+   req.type_filling = ORDER_FILLING_FOK;
+
+   if(!OrderSend(req, res))
+   {
+      string errorMsg = StringFormat("Partial close failed: %s", res.comment);
+      PrintFormat(errorMsg);
+      SendTradeAlert(errorMsg, "ERROR");
+   }
+   else
+   {
+      string successMsg = StringFormat("Partial close sent: ticket=%I64u closed_vol=%.2f", res.order, close_vol);
+      PrintFormat(successMsg);
+      SendTradeAlert(successMsg, "SUCCESS");
+   }
+}
+
+// Manage open positions: trailing, partial closes, break-even
+void ManagePositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != EA_magic) continue;
+      if(PositionGetString(POSITION_SYMBOL) != SYMBOL) continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double current_price = (type==POSITION_TYPE_BUY) ? SymbolInfoDouble(SYMBOL, SYMBOL_BID) : SymbolInfoDouble(SYMBOL, SYMBOL_ASK);
+      double point = SymbolInfoDouble(SYMBOL, SYMBOL_POINT);
+
+      // ATR trailing
+      if(UseATRTrailing && currentDominantIndex >= 0)
+      {
+         double adx, ema_slope, macd_hist, atr_dom;
+         if(GetIndicators(currentDominantIndex, adx, ema_slope, macd_hist, atr_dom))
+         {
+            double trailDistance = atr_dom * current_ATR_Trailing_Multiplier;
+            if(type == POSITION_TYPE_BUY)
+            {
+               double new_sl = current_price - trailDistance;
+               if(new_sl > sl + point)
+               {
+                  MqlTradeRequest req; MqlTradeResult res;
+                  ZeroMemory(req); ZeroMemory(res);
+                  req.action = TRADE_ACTION_SLTP;
+                  req.position = ticket;
+                  req.sl = NormalizeDouble(new_sl, (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS));
+                  if(!OrderSend(req, res))
+                  {
+                     PrintFormat("Trail SL update failed: %s", res.comment);
+                     SendTradeAlert(StringFormat("Trail SL update failed: %s", res.comment), "WARNING");
+                  }
+               }
+            }
+            else
+            {
+               double new_sl = current_price + trailDistance;
+               if(new_sl < sl - point)
+               {
+                  MqlTradeRequest req; MqlTradeResult res;
+                  ZeroMemory(req); ZeroMemory(res);
+                  req.action = TRADE_ACTION_SLTP;
+                  req.position = ticket;
+                  req.sl = NormalizeDouble(new_sl, (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS));
+                  if(!OrderSend(req, res))
+                  {
+                     PrintFormat("Trail SL update failed: %s", res.comment);
+                     SendTradeAlert(StringFormat("Trail SL update failed: %s", res.comment), "WARNING");
+                  }
+               }
+            }
+         }
+      }
+
+      // Break-even
+      if(UseBreakEven && currentDominantIndex >= 0)
+      {
+         double adx, ema_slope, macd_hist, atr_dom;
+         if(GetIndicators(currentDominantIndex, adx, ema_slope, macd_hist, atr_dom))
+         {
+            double sl_in_price = MathAbs(open_price - sl);
+            double r_val = 0.0;
+            if(sl_in_price > 0) r_val = MathAbs((current_price - open_price) / sl_in_price);
+            if(r_val >= BreakEvenAfterR)
+            {
+               double be_sl = (type == POSITION_TYPE_BUY) ? open_price + (SymbolInfoDouble(SYMBOL, SYMBOL_POINT) * 2) : open_price - (SymbolInfoDouble(SYMBOL, SYMBOL_POINT) * 2);
+               if(type == POSITION_TYPE_BUY && be_sl > sl)
+               {
+                  MqlTradeRequest req; MqlTradeResult res;
+                  ZeroMemory(req); ZeroMemory(res);
+                  req.action = TRADE_ACTION_SLTP;
+                  req.position = ticket;
+                  req.sl = NormalizeDouble(be_sl, (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS));
+                  if(!OrderSend(req, res))
+                  {
+                     PrintFormat("BE SL update failed: %s", res.comment);
+                     SendTradeAlert(StringFormat("BE SL update failed: %s", res.comment), "WARNING");
+                  }
+                  else
+                  {
+                     SendTradeAlert("Break-even stop loss activated", "SUCCESS");
+                  }
+               }
+               if(type == POSITION_TYPE_SELL && be_sl < sl)
+               {
+                  MqlTradeRequest req; MqlTradeResult res;
+                  ZeroMemory(req); ZeroMemory(res);
+                  req.action = TRADE_ACTION_SLTP;
+                  req.position = ticket;
+                  req.sl = NormalizeDouble(be_sl, (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS));
+                  if(!OrderSend(req, res))
+                  {
+                     PrintFormat("BE SL update failed: %s", res.comment);
+                     SendTradeAlert(StringFormat("BE SL update failed: %s", res.comment), "WARNING");
+                  }
+                  else
+                  {
+                     SendTradeAlert("Break-even stop loss activated", "SUCCESS");
+                  }
+               }
+            }
+         }
+      }
+
+      // Partial close
+      if(UsePartialClose)
+      {
+         double adx, ema_slope, macd_hist, atr_dom;
+         if(GetIndicators(currentDominantIndex >= 0 ? currentDominantIndex : 0, adx, ema_slope, macd_hist, atr_dom))
+         {
+            double sl_in_price = MathAbs(open_price - sl);
+            if(sl_in_price > 0)
+            {
+               double r_now = MathAbs((current_price - open_price) / sl_in_price);
+               if(type == POSITION_TYPE_BUY)
+               {
+                  if(r_now >= TP1_RR && PartialClose1_Percent>0)
+                  {
+                     PartialClosePosition(ticket, PartialClose1_Percent);
+                  }
+                  if(r_now >= TP2_RR && PartialClose2_Percent>0)
+                  {
+                     PartialClosePosition(ticket, PartialClose2_Percent);
+                  }
+               }
+               else
+               {
+                  if(r_now >= TP1_RR && PartialClose1_Percent>0)
+                  {
+                     PartialClosePosition(ticket, PartialClose1_Percent);
+                  }
+                  if(r_now >= TP2_RR && PartialClose2_Percent>0)
+                  {
+                     PartialClosePosition(ticket, PartialClose2_Percent);
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+// ---------------------- Entry logic -------------------------
+void TryEnterTrades()
+{
+    if(TradingPaused)
+    {
+        Print("⏸️ Trading paused by equity protection — skipping entries.");
+        SendCustomNotification("TRADING PAUSED: Equity protection active - no new entries", true);
+        return;
+    }
+    
+    // 🧩 Market Regime filter
+    if(Use_MarketRegime_Classifier)
+    {
+        if(currentRegime == REGIME_VOLATILE)
+        {
+            Print("⚠️ Market volatile — skipping entries.");
+            SendCustomNotification("Market volatile - skipping entries for safety");
+            return;
+        }
+        if(currentRegime == REGIME_RANGING && ml_conf_avg < 0.55)
+        {
+            Print("⚠️ Ranging market & low confidence — skipping trade.");
+            SendCustomNotification("Ranging market with low confidence - skipping trade");
+            return;
+        }
+    }
+
+   if(currentDominantIndex < 0) return;
+   if(!IsWithinSession()) return;
+   if(UseNewsFilter) { /* placeholder */ }
+
+   int openCount = CountOpenPositionsForMagic();
+   if(openCount >= MaxConcurrentTrades) return;
+
+   int execIdx = currentDominantIndex + ExecutionTF_offset;
+   if(execIdx >= TFs_to_monitor_count) return;
+
+   double adx_dom, ema_dom_slope, macd_dom, atr_dom;
+   if(!GetIndicators(currentDominantIndex, adx_dom, ema_dom_slope, macd_dom, atr_dom)) return;
+
+   int dir = 0;
+   if(ema_dom_slope > 0 && adx_dom >= current_ADX_enter) dir = 1;
+   if(ema_dom_slope < 0 && adx_dom >= current_ADX_enter) dir = -1;
+   if(dir == 0 && !AllowOppositeEntries) return;
+
+   int ema_exec = iMA(SYMBOL, TF_list[execIdx], 20, 0, MODE_EMA, PRICE_CLOSE);
+   double exec_ema_arr[];
+   if(CopyBuffer(ema_exec, 0, 0, 3, exec_ema_arr) <= 0) return;
+   double exec_ema = exec_ema_arr[0];
+
+    // 🧩 Dynamic Entry Mode Switching
+    currentEntryMode = DecideEntryMode();
+    bool entryOK = false;
+
+    if(currentEntryMode == ENTRY_BREAKOUT)
+    {
+        entryOK = CheckBreakoutSignal(dir, TF_list[execIdx]);
+        if(entryOK)
+        {
+            Print("🚀 Breakout entry confirmed (trending market).");
+            SendCustomNotification("Breakout entry confirmed - trending market conditions");
+        }
+    }
+    else if(currentEntryMode == ENTRY_PULLBACK)
+    {
+        entryOK = CheckPullbackSignal(dir, TF_list[execIdx]);
+        if(entryOK)
+        {
+            Print("🎯 Pullback entry confirmed (ranging market).");
+            SendCustomNotification("Pullback entry confirmed - ranging market conditions");
+        }
+    }
+    else if(currentEntryMode == ENTRY_DISABLED)
+    {
+        Print("⚠️ Entry disabled due to volatile market or low confidence.");
+        SendCustomNotification("Entry disabled: volatile market or low confidence");
+        return;
+    }
+
+    if(!entryOK) return;
+
+   double point = SymbolInfoDouble(SYMBOL, SYMBOL_POINT);
+   double price_exec = (dir==1) ? SymbolInfoDouble(SYMBOL, SYMBOL_ASK) : SymbolInfoDouble(SYMBOL, SYMBOL_BID);
+   double sl_price = (dir==1) ? price_exec - atr_dom * current_ATR_SL_multiplier : price_exec + atr_dom * current_ATR_SL_multiplier;
+   double sl_points = MathAbs(price_exec - sl_price) / point;
+   if(sl_points < 5) return;
+    
+    // Mode-based stop adjustment
+    double mode_adjust = 1.0;
+    if(currentEntryMode == ENTRY_PULLBACK)  mode_adjust = 1.1;
+    if(currentEntryMode == ENTRY_BREAKOUT)  mode_adjust = 0.9;
+
+    if(mode_adjust != 1.0)
+    {
+        if(dir == 1)
+            sl_price = price_exec - atr_dom * current_ATR_SL_multiplier * mode_adjust;
+        else
+            sl_price = price_exec + atr_dom * current_ATR_SL_multiplier * mode_adjust;
+
+        sl_points = MathAbs(price_exec - sl_price) / point;
+        if(sl_points < 5) return;
+    }
+
+   double lot = ComputeLotSizeFromRisk(sl_points);
+   if(lot <= 0) return;
+
+   double tp_price_primary;
+   if(current_TP_RR > 0)
+   {
+      double tp_distance = sl_points * current_TP_RR * point;
+      tp_price_primary = (dir==1) ? price_exec + tp_distance : price_exec - tp_distance;
+   }
+   else
+   {
+      double tp_distance = atr_dom * TP_ATR_multiplier;
+      tp_price_primary = (dir==1) ? price_exec + tp_distance : price_exec - tp_distance;
+   }
+
+   PlaceMarketOrder(dir, lot, NormalizeDouble(sl_price, (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS)),
+                    NormalizeDouble(tp_price_primary, (int)SymbolInfoInteger(SYMBOL, SYMBOL_DIGITS)));
+}
+
+// ------------------------ OnInit / Deinit / Tick --------------------
+int OnInit()
+{
+    SYMBOL = (StringLen(InpSymbol) > 0) ? InpSymbol : _Symbol;
+    
+    // Initialize handles array
+    for(int i=0; i<20; i++)
+    {
+        handles_array[i].adx = 0;
+        handles_array[i].ema = 0;
+        handles_array[i].macd = 0;
+        handles_array[i].atr = 0;
+    }
+    
+    startOfDayBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    startOfDay = TimeCurrent();
+
+    // Initialize adaptive parameters
+    current_ADX_enter = (int)ADX_enter;
+    current_ScoreThreshold = ScoreThreshold;
+    current_ATR_SL_multiplier = ATR_SL_multiplier;
+    current_ATR_Trailing_Multiplier = ATR_Trailing_Multiplier;
+    current_TP_RR = TP_RR;
+    current_RiskPercent = RiskPercent;
+
+    // Initialize ML weights
+    for(int t=0; t<TFs_to_monitor_count; t++)
+    {
+        ML_bias[t] = 0.0;
+        for(int f=0; f<ML_features; f++)
+            ML_weights[t][f] = 0.0001 * (MathSin(TimeCurrent() + t*13 + f*7));
+    }
+    ML_trained = false;
+    
+// --- ADD THIS CORRECTED BLOCK ---
+    if(ML_ENABLED) //
+    {
+        if(LoadMLWeights()) //
+        {
+            Print("ML: Successfully loaded existing weights file.");
+            // ML_trained is set to true inside LoadMLWeights
+        }
+        else
+        {
+            Print("ML: No weights file found.");
+            
+            // Only train if we are in the tester BUT NOT in optimization mode.
+            if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_OPTIMIZATION))
+            {
+                Print("ML: Starting initial training (this may take a moment)...");
+                if(ML_BuildTrainingAndTrain()) //
+                {
+                    Print("ML: Initial training complete.");
+                    // ML_trained is set to true inside ML_BuildTrainingAndTrain
+                    SaveMLWeights(); //
+                }
+                else
+                {
+                    Print("ML: Initial training FAILED. ML features will be inactive.");
+                }
+            }
+            else if (MQLInfoInteger(MQL_OPTIMIZATION))
+            {
+                Print("ML: Skipping training (Optimization mode). ML features will be inactive for this pass.");
+            }
+            else
+            {
+                 Print("ML: No weights file found. Please run a single backtest to create one. ML features will be inactive.");
+            }
+        }
+    }
+    // --- END OF CORRECTED BLOCK ---
+    
+    // Check data availability for all timeframes
+    Print("=== Checking Data Availability ===");
+    for(int i=0; i<TFs_to_monitor_count; i++)
+    {
+        ENUM_TIMEFRAMES tf = TF_list[i];
+        MqlRates rates[1];
+        int bars = CopyRates(SYMBOL, tf, 0, 1, rates);
+        if(bars > 0)
+        {
+            PrintFormat("✅ Data available for %s on %s", SYMBOL, EnumToString(tf));
+        }
+        else
+        {
+            PrintFormat("❌ NO DATA for %s on %s - Error: %d", SYMBOL, EnumToString(tf), GetLastError());
+        }
+    }
+    Print("=== Data Check Complete ===");
+
+    // Send startup notification
+    if(EnableTelegram)
+    {
+        string startupMsg = "🚀 EA Started: DominantTimeframeTrader_Full_ML\n" +
+                           "📊 Symbol: " + SYMBOL + "\n" +
+                           "💰 Account: " + AccountInfoString(ACCOUNT_NAME);
+        SendTelegramMessage(startupMsg);
+    }
+
+    Print("DominantTimeframeTrader_Full_ML initialized for symbol: ", SYMBOL);
+    return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+    string reasonText;
+    switch(reason)
+    {
+        case REASON_PROGRAM:        reasonText = "Program terminated"; break;
+        case REASON_REMOVE:         reasonText = "Expert removed from chart"; break;
+        case REASON_RECOMPILE:      reasonText = "Expert recompiled"; break;
+        case REASON_CHARTCHANGE:    reasonText = "Symbol or timeframe changed"; break;
+        case REASON_CHARTCLOSE:     reasonText = "Chart closed"; break;
+        case REASON_PARAMETERS:     reasonText = "Input parameters changed"; break;
+        case REASON_ACCOUNT:        reasonText = "Account changed"; break;
+        case REASON_TEMPLATE:       reasonText = "New template applied"; break;
+        case REASON_INITFAILED:     reasonText = "Initialization failed"; break;
+        case REASON_CLOSE:          reasonText = "Terminal closed"; break;
+        default:                    reasonText = "Unknown reason"; break;
+    }
+
+    if(EnableTelegram)
+    {
+        string shutdownMsg = "🛑 EA Stopped: DominantTimeframeTrader_Full_ML\n" +
+                            "📊 Symbol: " + SYMBOL + "\n" +
+                            "📋 Reason: " + reasonText;
+        SendTelegramMessage(shutdownMsg);
+    }
+
+    if(ML_ENABLED && ML_trained)
+    {
+        if(SaveMLWeights())
+            Print("ML: weights saved successfully.");
+        else
+        {
+            Print("ML: failed to save weights.");
+            SendCustomNotification("ML Weights Save Failed!", true);
+        }
+    }
+
+   for(int i=0;i<TFs_to_monitor_count;i++)
+   {
+      if(handles_array[i].adx) IndicatorRelease(handles_array[i].adx);
+      if(handles_array[i].ema) IndicatorRelease(handles_array[i].ema);
+      if(handles_array[i].macd) IndicatorRelease(handles_array[i].macd);
+      if(handles_array[i].atr) IndicatorRelease(handles_array[i].atr);
+   }
+}
+
+void OnTick()
+{
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   if(startOfDay == 0 || (dt.hour == 0 && dt.min == 0))
+   {
+      startOfDay = TimeCurrent();
+      startOfDayBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      SendCustomNotification("New trading day started - daily balance reset");
+   }
+   double lossPercent = 0.0;
+   if(startOfDayBalance > 0) lossPercent = MathMax(0.0, (startOfDayBalance - AccountInfoDouble(ACCOUNT_BALANCE)) / startOfDayBalance * 100.0);
+   if(lossPercent >= MaxDailyLossPercent) {
+      Print("Daily loss limit hit - trading suspended.");
+      SendCustomNotification("DAILY LOSS LIMIT HIT - TRADING SUSPENDED", true);
+      return;
+   }
+
+   ENUM_TIMEFRAMES smallestTF = TF_list[TFs_to_monitor_count-1];
+   MqlRates rates[];
+   if(CopyRates(SYMBOL, smallestTF, 0, 1, rates) > 0)
+   {
+      if(rates[0].time != lastSmallTFBarTime)
+      {
+         lastSmallTFBarTime = rates[0].time;
+         if(cooldownRemaining > 0) cooldownRemaining--;
+          // 🧩 Equity-Curve Protection logic (runs once per bar)
+          if(Use_EquityProtection)
+          {
+              // --- Record latest equity ---
+              double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+              EquityHistory[EquityIndex % 100] = currentEquity;
+              EquityIndex++;
+
+              // --- Compute slope and drawdown ---
+              double slope = ComputeEquitySlope(EquitySlope_Trades);
+              double dailyDrawdown = (startOfDayBalance - currentEquity) / MathMax(1.0, startOfDayBalance) * 100.0;
+
+              // --- Protection conditions ---
+              bool poorPerformance = (slope < 0.0 && ml_conf_avg < MinMLConfidence_Protect);
+              bool tooMuchLoss     = (dailyDrawdown >= MaxDrawdownPercent_Protect);
+
+              if((poorPerformance || tooMuchLoss) && !TradingPaused)
+              {
+                  TradingPaused = true;
+                  PauseBarsRemaining = PauseTrading_Bars;
+                  string alertMsg = StringFormat("⚠️ Equity Protection triggered! DD=%.2f%% slope=%.2f conf=%.2f -> Pausing entries for %d bars",
+                              dailyDrawdown, slope, ml_conf_avg, PauseTrading_Bars);
+                  PrintFormat(alertMsg);
+                  SendCustomNotification(alertMsg, true);
+              }
+
+              if(TradingPaused)
+              {
+                  // check if market recovered (positive slope or high confidence)
+                  double currentSlope = ComputeEquitySlope(EquitySlope_Trades);
+                  bool recovery = (currentSlope > 0 && ml_conf_avg > 0.6);
+
+                  PauseBarsRemaining--;
+                  if(PauseBarsRemaining <= 0 || recovery)
+                  {
+                      TradingPaused = false;
+                      string resumeMsg = StringFormat("✅ Equity Protection: trading resumed early. slope=%.3f conf=%.2f", currentSlope, ml_conf_avg);
+                      PrintFormat(resumeMsg);
+                      SendCustomNotification(resumeMsg, true);
+                  }
+              }
+          }
+          
+          // 🧠 Market Regime Classification (using dominant timeframe if available)
+          if(Use_MarketRegime_Classifier)
+          {
+              ENUM_TIMEFRAMES tf_check = (currentDominantIndex >= 0) ? TF_list[currentDominantIndex] : PERIOD_H1;
+              lastRegime = currentRegime;
+              currentRegime = DetectMarketRegime(tf_check);
+
+              if(currentRegime != lastRegime)
+              {
+                  string regimeName = (currentRegime==REGIME_TRENDING) ? "TRENDING" :
+                                      (currentRegime==REGIME_RANGING) ? "RANGING" :
+                                      (currentRegime==REGIME_VOLATILE) ? "VOLATILE" : "UNKNOWN";
+                  string regimeMsg = StringFormat("📊 Market Regime switched to %s on TF %d", regimeName, (int)tf_check);
+                  PrintFormat(regimeMsg);
+                  SendCustomNotification(regimeMsg, true);
+              }
+          }
+
+          // 🧠 Confidence decay when no dominant trend (flat market protection)
+          if(currentDominantIndex < 0)
+              ml_conf_avg = ml_conf_avg * 0.98 + 0.5 * 0.02;   // slowly revert toward neutral 0.5
+         // Evaluate with fusion of rule + ML
+         EvaluateDominantTFWithFusion();
+          // Compute average ML confidence for current dominant timeframe
+          double probs[20];
+          if(ML_ENABLED && ML_trained && ML_PredictProbabilities(probs))
+          {
+              double current_conf = 0.0;
+              if(currentDominantIndex >= 0) current_conf = probs[currentDominantIndex];
+              ml_conf_avg = ml_conf_avg*0.9 + current_conf*0.1;   // smooth moving average
+
+              // Adaptive tuning - use non-const versions
+              current_ADX_enter = (int)MathRound(25 - (ml_conf_avg - 0.5) * 10);             // 20–30
+              current_ScoreThreshold = 0.6 + (0.5 - ml_conf_avg) * 0.2;                 // 0.5–0.7
+              current_ATR_SL_multiplier = 2.0 + (0.5 - ml_conf_avg) * 0.5;              // 1.75–2.25
+          }
+          // ✅ Debug print for adaptive ML tuning
+          PrintFormat("ML adapt: conf=%.2f  ADX_enter=%d  ScoreThr=%.2f  ATRx=%.2f",
+                      ml_conf_avg, current_ADX_enter, current_ScoreThreshold, current_ATR_SL_multiplier);
+          
+          // 🔄 Volatility Regime Detection: Adjust ATR multipliers to market conditions
+          int atr14_handle = iATR(SYMBOL, PERIOD_D1, 14);
+          int atr100_handle = iATR(SYMBOL, PERIOD_D1, 100);
+          double atr14_buf[], atr100_buf[];
+          double dailyATR_14 = 0, dailyATR_100 = 0;
+          if(CopyBuffer(atr14_handle, 0, 0, 1, atr14_buf) > 0) dailyATR_14 = atr14_buf[0];
+          if(CopyBuffer(atr100_handle, 0, 0, 1, atr100_buf) > 0) dailyATR_100 = atr100_buf[0];
+          IndicatorRelease(atr14_handle);
+          IndicatorRelease(atr100_handle);
+          
+          if(dailyATR_14 > 0 && dailyATR_100 > 0)
+          {
+              double vol_ratio = dailyATR_14 / dailyATR_100;
+
+              // Adjust ATR-based parameters smoothly
+              double adj_factor = 1.0;
+              if(vol_ratio > 1.5)      adj_factor = 0.85;   // high vol → tighter stops
+              else if(vol_ratio < 0.7) adj_factor = 1.15;   // low vol → wider stops
+
+              // Apply adaptive scaling to non-const versions
+              current_ATR_SL_multiplier       = 2.0 * adj_factor;
+              current_ATR_Trailing_Multiplier = 1.2 * adj_factor;
+              current_TP_RR                   = 1.5 * (1.0 / adj_factor);  // tighter SL → smaller RR, wider SL → larger RR
+
+              // Debug log
+              PrintFormat("Volatility regime: ratio=%.2f adj=%.2f | ATRx=%.2f Trailx=%.2f TP_RR=%.2f",
+                          vol_ratio, adj_factor, current_ATR_SL_multiplier, current_ATR_Trailing_Multiplier, current_TP_RR);
+          }
+          
+          // 🌍 Composite Volatility Index (CVI) — recalculated once per day for efficiency
+          static datetime lastCVIUpdate = 0;
+          static double   lastCVIValue  = 1.0;
+          MqlDateTime now;
+          TimeToStruct(TimeCurrent(), now);
+
+          // Recompute CVI once per new day
+          MqlDateTime lastdt;
+          TimeToStruct(lastCVIUpdate, lastdt);
+          if(now.day != lastdt.day || lastCVIUpdate == 0)
+          {
+              lastCVIValue = ComputeCompositeVolatilityIndex();
+              lastCVIUpdate = TimeCurrent();
+              string cviMsg = StringFormat("CVI recomputed: %.3f (at %s)", lastCVIValue, TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+              PrintFormat(cviMsg);
+              SendCustomNotification(cviMsg);
+          }
+          double CVI = lastCVIValue;
+          if(CVI > 0)
+          {
+              // Normalize extreme values
+              CVI = MathMin(2.5, MathMax(0.5, CVI));
+
+              // Adjust global risk & ATR multipliers inversely to volatility
+              double cvi_adjust = MathPow(1.0 / CVI, 0.5) * CVI_VolatilityScale; // smoother inverse scaling
+              current_ATR_SL_multiplier       *= cvi_adjust;
+              current_ATR_Trailing_Multiplier *= cvi_adjust;
+              current_TP_RR                   *= cvi_adjust;
+
+              // Adjust risk scaling inversely to volatility (reduces lot size in wild markets)
+              current_RiskPercent = MathMax(0.2, MathMin(5.0, current_RiskPercent * cvi_adjust));
+
+              PrintFormat("CVI=%.2f (adj=%.2f) → ATRx=%.2f  Trailx=%.2f  TP_RR=%.2f  Risk%%=%.2f",
+                          CVI, cvi_adjust, current_ATR_SL_multiplier, current_ATR_Trailing_Multiplier, current_TP_RR, current_RiskPercent);
+          }
+
+         if(currentDominantIndex >= 0)
+         {
+            int exhaustedCount = 0;
+            for(int b=0;b<ExhaustionConfirmBars;b++)
+               if(CheckExhaustion(currentDominantIndex)) exhaustedCount++;
+             if(exhaustedCount >= ExhaustionConfirmBars)
+             {
+                 double extra_cooldown = (1.0 - ml_conf_avg) * 3.0;   // +0 to +3 bars when confidence is low
+                 cooldownRemaining = Cooldown_bars + (int)MathRound(extra_cooldown);
+
+                 string exhaustMsg = StringFormat("Dominant timeframe exhausted. Entering dynamic cooldown: %d bars (conf=%.2f)",
+                             cooldownRemaining, ml_conf_avg);
+                 PrintFormat(exhaustMsg);
+                 SendCustomNotification(exhaustMsg, true);
+
+                 PrintFormat("Adaptive State → conf=%.2f | ADX_enter=%d | ScoreThr=%.2f | ATRx=%.2f | RiskAdj=%.2f%% | Cooldown=%d",
+                             ml_conf_avg, current_ADX_enter, current_ScoreThreshold, current_ATR_SL_multiplier,
+                             current_RiskPercent * MathMin(3.0, MathMax(0.5, ml_conf_avg * 2.0)),
+                             cooldownRemaining);
+
+                 currentDominantIndex = -1;
+             }
+            else
+            {
+               // online training: when a dominant is stable for TrendConfirmBars we can treat it as a confirmed label and update model
+               static int stableCount = 0;
+               static int lastConfirmedIdx = -1;
+               if(lastConfirmedIdx == currentDominantIndex) stableCount++; else { stableCount = 1; lastConfirmedIdx = currentDominantIndex; }
+               if(ML_ENABLED && stableCount >= TrendConfirmBars)
+               {
+                  // extract features for this confirmed label and update model
+                  double xfeat[10];
+                  if(ExtractFeaturesForML(currentDominantIndex, xfeat))
+                  {
+                     ML_OnlineUpdate(xfeat, currentDominantIndex);
+                     ML_trained = true;
+                     string updateMsg = StringFormat("ML: online update for label idx=%d (stableCount=%d)", currentDominantIndex, stableCount);
+                     PrintFormat(updateMsg);
+                     SendCustomNotification(updateMsg);
+                  }
+               }
+               TryEnterTrades();
+            }
+         }
+      }
+   }
+
+   ManagePositions();
+}
