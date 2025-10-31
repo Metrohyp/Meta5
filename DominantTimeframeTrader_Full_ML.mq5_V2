@@ -23,7 +23,7 @@ input bool     EnableTelegram   = true;                 // Enable Telegram notif
 input string  InpSymbol                 = "";               // "" -> current symbol
 // --- Timeframes to monitor ---
 #define TF_COUNT 3
-const ENUM_TIMEFRAMES TF_list[TF_COUNT] = {PERIOD_H1, PERIOD_M30, PERIOD_M15};
+const ENUM_TIMEFRAMES TF_list[TF_COUNT] = {PERIOD_H4, PERIOD_H1, PERIOD_M30, PERIOD_M15, PERIOD_M5};
 input int TFs_to_monitor_count = TF_COUNT;
 
 input int     ExecutionTF_offset        = 1;               // execution TF = dominant index + offset
