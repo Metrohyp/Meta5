@@ -11,12 +11,11 @@
 #include <Trade/Trade.mqh>
 CTrade Trade;
 
-//============================== Inputs ==============================
 //================================================================================
-//                 --- Main Strategy Inputs (Optimization Focus) ---
+input string   _A___Main_Strategy______ = "===== Main Strategy Inputs (Optimization Focus) =====";
 //================================================================================
 // --- Main Strategy ---
-input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H2;      // The timeframe the main strategy runs on.
+input ENUM_TIMEFRAMES TF_Trade        = PERIOD_H1;      // The timeframe the main strategy runs on.
 input double         Risk_Percent     = 2.0;            // Risk % for main trades. Set to 0 to use Fixed_Lots.
 input double         Fixed_Lots       = 0.20;           // Lot size for main trades if Risk_Percent is 0.
 input double         RR_Min           = 1.5;            // MINIMUM R:R for main trades.
@@ -24,10 +23,10 @@ input double         RR_Max           = 3.0;            // MAXIMUM R:R for main 
 
 // --- Main Strategy Filters ---
 input bool           Use_HTF_Breakout_Filter = true;    // Require a breakout on a higher timeframe.
-input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H4;    // Timeframe for the filter.
-input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_H1; // Main trade pending orders Timeframe to watch.
+input ENUM_TIMEFRAMES TF_HTF_Breakout   = PERIOD_H2;    // Timeframe for the filter.
+input ENUM_TIMEFRAMES TF_Main_Cancel_Gate  = PERIOD_H2; // Main trade pending orders Timeframe to watch.
 input bool           Use_H1H4_Filter    = false;        // Require main trades to align with H1/H4 SuperTrend.
-input bool           Use_ST_Flip_Retest = false;        // Wait for price to pull back to the ST line before entry.
+input bool           Use_ST_Flip_Retest = true;        // Wait for price to pull back to the ST line before entry.
 input int            Max_Entry_Stages   = 4;            // Allow adding to a trade up to X times.
 input int            Stage_Cooldown_Bars = 1;           // Bars to wait before adding next stage
 input bool           One_Trade_At_A_Time = false;       // If true, only one main trade is allowed at a time.
@@ -37,7 +36,7 @@ input int            Cooldown_Bars    = 2;              // Bars to wait before o
 input bool           Use_Retrace_Limit_Entry = true;    // If true, adds a limit order on pullback.
 input bool           Use_Pending_Stop_Entries = false;  // Use BUY_STOP/SELL_STOP instead of market orders.
 input double         StopEntry_Offset_ATR = 0.2;        // ATR multiple to offset pending stop entry.
-input int            StopEntry_Expiry_Bars = 12;        // How many bars a pending stop order is valid for.
+input int            StopEntry_Expiry_Bars = 18;        // How many bars a pending stop order is valid for.
 
 // --- Main Indicator-Specific Settings ---
 input double         AO_Min_Strength  = 1.0;            // Min AO strength for Main trades.
@@ -48,23 +47,21 @@ input bool           Use_Fib_Targets    = true;         // Use Fibo-based TP for
 input bool           Use_RR_Range       = true;         // Use R:R range for Main trades.
 input bool           Use_ST_as_Stop     = true;         // Use SuperTrend line as a dynamic stop loss.
 input double         ST_Stop_Pad_Mult   = 0.3;          // ATR padding for the SuperTrend stop.
-input double         TP_Max_ATR_Mult    = 11.0;         // Max TP size as an ATR multiple.
-input double         TP_Swing_Ext_ATR_Mult = 1.00;      // TP swing extension ATR multiple.
+input double         TP_Max_ATR_Mult    = 10.0;         // Max TP size as an ATR multiple.
+input double         TP_Swing_Ext_ATR_Mult = 0.5;      // TP swing extension ATR multiple.
 
 // --- Main Filter Mechanics ---
 input int            HTF_Breakout_Lookback = 200;       // Lookback for HTF breakout filter.
-input double         HTF_Breakout_ATR_Margin = 1.25;    // ATR margin for HTF breakout.
-input int            HTF_Breakout_Mode  = 10;           // (Orphaned/Internal use)
 input int            HTF_Breakout_MaxAgeBars = 1;       // Max age of breakout signal.
 input double         Retest_ATR_Tolerance = 1.25;       // ATR tolerance for ST retest.
-input double         AddEntry_Trigger_Ratio = 0.3;      // % pullback towards SL to allow adding a new stage.
-input int            Min_Bars_After_Flip = 3;           // Bars to wait after ST flip before retest entry.
+input double         AddEntry_Trigger_Ratio = 0.2;      // % pullback towards SL to allow adding a new stage.
+input int            Min_Bars_After_Flip = 4;           // Bars to wait after ST flip before retest entry.
 input double         Confirm_Close_Dist_ATR = 0.20;     // Min distance from ST line to confirm retest.
-input bool           Require_Retrace_Or_Breakout = false; // Require entry to be a retrace or breakout.
-input double         Breakout_ATR_Margin = 0.40;        // ATR margin for main trade breakout.
+input bool           Require_Retrace_Or_Breakout = true; // Require entry to be a retrace or breakout.
+input double         Breakout_ATR_Margin = 1.40;        // ATR margin for main trade breakout.
 
 //================================================================================
-//                 --- Scalp Strategy Inputs (Optimization Focus) ---
+input string   _B___Scalp_Strategy______ = "===== Scalp Strategy Inputs (Optimization Focus) =====";
 //================================================================================
 
 // --- Scalp Strategy ---
@@ -80,60 +77,59 @@ input double         Scalp_RR_Max     = 3.0;            // MAXIMUM R:R for scalp
 // --- Scalp Strategy Filters ---
 input bool           Scalp_Gate_By_HTF  = true;         // Require scalp trades to align with HTF breakout.
 input ENUM_TIMEFRAMES TF_Scalp_Gate_HTF = PERIOD_M20;   // scalp alignment filter Timeframe.
-input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M5; // Scalp trade pending orders Timeframe to watch.
+input ENUM_TIMEFRAMES TF_Scalp_Cancel_Gate = PERIOD_M20; // Scalp trade pending orders Timeframe to watch.
 input bool           Scalp_Only_When_No_Main = false;   // Block scalps if a main trade is already open.
-input int            Scalp_Max_Concurrent = 6;          // Max number of simultaneous scalp trades.
+input int            Scalp_Max_Concurrent = 4;          // Max number of simultaneous scalp trades.
 input double         Scalp_Gate_ATR_Margin = 0.60;      // ATR margin for scalp HTF gate.
 
 // --- Scalp Pending Order Mechanics ---
-input double         Scalp_StopEntry_Offset_ATR = 0.02; // (Not currently used, scalp uses Limit/Market)
-input int            Scalp_StopEntry_Expiry_Bars = 12;  // Expiry for scalp limit orders.
-input double         Scalp_Market_Entry_ATR_Zone = 3.0; // ATR zone around Alligator Lips for market entry.
+input int            Scalp_StopEntry_Expiry_Bars = 30;  // Expiry for scalp limit orders.
+input double         Scalp_Market_Entry_ATR_Zone = 0.5; // ATR zone around Alligator Lips for market entry.
 
 // --- Scalp Indicator-Specific Settings ---
-input double         AO_Scalp_Min_Strength = 0.5;       // Min AO strength for Scalp trades.
-input double         Mom_Scalp_Min_Strength = 5.0;      // Required Momentum strength for scalps.
-input int            Scalp_ATR_Period   = 9;            // ATR Period for scalp SL/TP calculation.
+input double         AO_Scalp_Min_Strength = 1.0;       // Min AO strength for Scalp trades.
+input double         Mom_Scalp_Min_Strength = 0.5;      // Required Momentum strength for scalps.
+input int            Scalp_ATR_Period   = 14;            // ATR Period for scalp SL/TP calculation.
 
 // --- Scalp SL/TP Mechanics ---
 input bool           Scalp_Use_RR_Range = true;         // Use R:R range for Scalp trades.
-input double         Scalp_TP_Max_ATR_Mult = 2.0;       // Max TP for scalps.
+input double         Scalp_TP_Max_ATR_Mult = 3.0;       // Max TP for scalps.
 input double         Scalp_TP_Swing_Ext_ATR_Mult = 1.0; // TP swing extension for scalps.
 input double         Scalp_SL_ATR_Mult  = 1.0;          // SL ATR multiple for scalps.
 input bool           Protect_Scalp_SLTP = false;        // Prevent trade management (BE, Trail) from modifying scalp trades.
 
 //================================================================================
-//                 --- Shared Settings (Entries, Exits & Filters) ---
+input string   _C___Shared_Settings______ = "===== Shared Settings (Entries, Exits & Filters) =====";
 //================================================================================
 
 // --- General Entry Filters (Shared) ---
-input bool           Cancel_Pending_On_Flip = true;     // Cancel pending orders if SuperTrend flips.
+input bool           Cancel_Pending_On_Flip = false;     // Cancel pending orders if SuperTrend flips.
 input bool           Use_OverboughtOversold_Filter = true; // Block entries in extreme WPR zones.
 input double         WPR_Overbought_Level          = -25.0; // Level above which buys are blocked.
 input double         WPR_Oversold_Level            = -85.0; // Level below which sells are blocked.
-input bool           Use_Anti_Chasing_Filter = false;   // NEW: Block entries if > X% to TP
-input double         Anti_Chasing_Filter_Percent = 25.0;// Block entries if > X% to TP
-input bool           Use_Breakout_Confirmation   = false; // Require a sequence of candles to confirm a breakout.
+input bool           Use_Anti_Chasing_Filter = true;   // NEW: Block entries if > X% to TP
+input double         Anti_Chasing_Filter_Percent = 55.0;// Block entries if > X% to TP
+input bool           Use_Breakout_Confirmation   = true; // Require a sequence of candles to confirm a breakout.
 input int            Required_Confirmation_Candles = 2; // Number of follow-up candles required (2 or 3).
 input double         Breakout_Min_Body_ATR_Mult = 0.2;  // Body must be > 20% of ATR
 
 // --- Proactive & Emergency Exits (Shared) ---
 input bool           Use_Momentum_Exit_Filter = true;   // If true, exits on signs of trend exhaustion (divergence).
 input int            Divergence_Lookback_Bars = 15;     // How many bars to check for divergence.
-input double         Momentum_Exit_Min_TP_Percent = 35.0; // Trigger Momentum Exit only if > X% to TP
+input double         Momentum_Exit_Min_TP_Percent = 60.0; // Trigger Momentum Exit only if > X% to TP
 input bool           Use_Volatility_CircuitBreaker = true; // Emergency brake for extreme volatility.
 input double         CircuitBreaker_ATR_Mult = 2.0;     // Closes all if a candle is > X times the average size.
 
 // --- Trailing Stops (Shared) ---
 input bool           Use_ATR_Trailing   = true;         // Dynamic SL that follows price based on volatility.
 input int            ATR_Period_Trail   = 10;           // <-- ATR period for the trailing stop
-input double         ATR_Trail_Mult     = 3.5;          // Multiplier for ATR Trail. Higher = wider trail.
+input double         ATR_Trail_Mult     = 2;          // Multiplier for ATR Trail. Higher = wider trail.
 input bool           Use_HalfStep_Trailing = false;     // Alternative trail: SL moves half the distance to TP.
 input bool           HalfTrail_NewBar_Only = true;      // <-- Only update half-step on new bars
 
 // --- Break-Even (Shared) ---
-input double         BE_Activation_TP_Percent = 5.0;    // Move SL to BE when trade is X% of the way to TP.
-input double         BE_Profit_Percent        = 1.0;    // lock in at BE profit (as % of TP).
+input double         BE_Activation_TP_Percent = 10.0;    // Move SL to BE when trade is X% of the way to TP.
+input double         BE_Profit_Percent        = 1.5;    // lock in at BE profit (as % of TP).
 input double         BE_Buffer_Points         = 300.0;  // Profit gap in points for BE (e.g., 100)
 
 // --- Partial Close & TP Management (Shared) ---
@@ -152,19 +148,19 @@ input int            Trade_End_Min     = 0;             // End minute (e.g., 0)
 
 // --- Indicator Confirmation Toggles (Shared) ---
 input bool Use_Alligator_Filter = true;                 // Use Alligator state for confirmation
-input bool Use_AO_Filter = false;                       // Use Awesome Oscillator strength for confirmation
-input bool Use_Momentum_Filter = false;                 // true = require Momentum confirmation
-input bool Use_WPR_Filter = false;                      // Use WPR for signals & filters (MASTER)
+input bool Use_AO_Filter = true;                       // Use Awesome Oscillator strength for confirmation
+input bool Use_Momentum_Filter = true;                 // true = require Momentum confirmation
+input bool Use_WPR_Filter = true;                      // Use WPR for signals & filters (MASTER)
 
 // --- Core Indicator Settings (Shared) ---
 input int            ST_ATR_Period    = 14;             // SuperTrend ATR Period
 input double         ST_ATR_Mult      = 2.0;            // SuperTrend ATR Multiplier
-input int            Jaw_Period       = 13;             // Alligator Jaw Period
-input int            Jaw_Shift        = 8;
-input int            Teeth_Period     = 8;              // Alligator Teeth Period
-input int            Teeth_Shift      = 5;
-input int            Lips_Period      = 5;              // Alligator Lips Period
-input int            Lips_Shift       = 3;
+input int            Jaw_Period       = 6;             // Alligator Jaw Period
+input int            Jaw_Shift        = 10;
+input int            Teeth_Period     = 10;              // Alligator Teeth Period
+input int            Teeth_Shift      = 1;
+input int            Lips_Period      = 4;              // Alligator Lips Period
+input int            Lips_Shift       = 1;
 input int            Momentum_Period     = 10;          // Period for the Momentum indicator
 input int            Mom_StdDev_Period = 20;            // Lookback for Momentum Volatility (StdDev)
 input bool           Use_WPR_Bias     = true;           // Use WPR -50 line bias filter.
@@ -180,7 +176,7 @@ input double         Min_SL_ATR_Mult    = 0.75;         // Absolute minimum SL i
 input int            Min_SL_Points      = 0;            // Absolute minimum SL in points.
 
 //================================================================================
-//                --- System & Maintenance Inputs (Set & Forget) ---
+input string   _D___System_And_Maintenance______ = "===== System & Maintenance Inputs (Set & Forget) =====";
 //================================================================================
 // --- General ---
 input bool           Auto_Trade       = true;           // MASTER SWITCH: true = place trades, false = signals only
@@ -1355,6 +1351,30 @@ void EmergencyCloseAllPositions(const string reason)
         {
             if(PositionGetString(POSITION_SYMBOL) == _Symbol)
             {
+                // --- NEW SELECTIVE LOGIC ---
+                
+                // 1. Check if the trade is in profit ("market goes my way")
+                bool isInProfit = (PositionGetDouble(POSITION_PROFIT) > 0.0);
+                
+                // 2. Check if any trailing stop system is enabled in settings
+                bool isTrailEnabled = (Use_ATR_Trailing || Use_HalfStep_Trailing);
+
+                // 3. Check if the global trail flag has been set (meaning BE or Trail has moved at least once)
+                bool isTrailActive = isTrailEnabled && g_trailingActivated;
+
+                //
+                // IF the trade is in profit OR a trailing stop is active, SKIP CLOSING.
+                //
+                if (isInProfit || isTrailActive)
+                {
+                    // Uncomment the line below if you want an alert
+                    // SendTG("🔔 Breaker skipped for ticket #" + (string)tickets[i] + ". Trade is in profit or being trailed.");
+                    continue; // Skip this ticket, let it run
+                }
+                
+                // --- END SELECTIVE LOGIC ---
+
+                // If we are here, the trade is NOT in profit AND NOT being trailed. Close it.
                 if(Trade.PositionClose(tickets[i], 10))
                 {
                     if(Trade.ResultRetcode() == TRADE_RETCODE_DONE || Trade.ResultRetcode() == TRADE_RETCODE_PLACED)
@@ -3116,11 +3136,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest      &req,
                         const MqlTradeResult       &res)
 {
+    // Only look for new deals being added or orders being deleted
     if(trans.type != TRADE_TRANSACTION_DEAL_ADD && trans.type != TRADE_TRANSACTION_ORDER_DELETE)
     {
         return;
     }
     
+    // --- SECTION 1: A NEW DEAL WAS ADDED (A TRADE WAS OPENED) ---
     if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
     {
         ulong deal = (ulong)trans.deal;
@@ -3135,6 +3157,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         long mg = (long)HistoryDealGetInteger(deal, DEAL_MAGIC);
         if(mg != Magic_Main && mg != Magic_Scalp) return;
         
+        // This is a new trade entry
         if(entryType == DEAL_ENTRY_IN)
         {
             long   dType   = (long)HistoryDealGetInteger(deal, DEAL_TYPE);
@@ -3154,10 +3177,22 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                 tp = PositionGetDouble(POSITION_TP);
             }
             
-            if(isScalp && g_trailingActivated)
+            // ==================== BUG FIX START ====================
+            //
+            // We check if this is a scalp trade AND if 'Adjust_All_To_Latest' is on.
+            // If so, we call ApplySLTPToAllOpen, which correctly
+            // respects the 'Adjust_All_Exclude_Scalps' setting.
+            //
+            if(isScalp && Adjust_All_To_Latest)
             {
-                SyncAllStopsSafely(sl);
+                // Determine direction (+1 for Buy, -1 for Sell)
+                int dir = (dType == DEAL_TYPE_BUY) ? +1 : -1;
+                
+                // Call the correct function that respects 'Adjust_All_Exclude_Scalps'
+                ApplySLTPToAllOpen(dir, sl, tp);
             }
+            //
+            // ===================== BUG FIX END =====================
             
             string execMsg = StringFormat(
                                           "✅ <b>TRADE EXECUTED</b>\n\n"
@@ -3175,6 +3210,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             return;
         }
         
+        // This is a trade exit
         if(Send_Closed_Trade_Alerts && (entryType==DEAL_ENTRY_OUT || entryType==DEAL_ENTRY_OUT_BY))
         {
             double P    = HistoryDealGetDouble (deal, DEAL_PROFIT);
@@ -3226,10 +3262,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             else if(dealReason == DEAL_REASON_VMARGIN)     reason = "Closed by Var. Margin";
             else if(dealReason == DEAL_REASON_SPLIT)       reason = "Closed due to Split";
             else if(entryComment == "")                    reason = "Closed Manually (No Comment)";
-            
             string typeStr = (originalDealType == DEAL_TYPE_BUY) ? "BUY" : ((originalDealType == DEAL_TYPE_SELL) ? "SELL" : "Unknown");
             string finalComment = (dealComment != "" && dealComment != "tp" && dealComment != "sl") ? dealComment : entryComment;
-            
             string closeMsg = StringFormat(
                                            "%s <b>POSITION CLOSED</b>\n\n"
                                            "📊 <b>Symbol:</b> %s\n"
@@ -3254,6 +3288,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             return;
         }
     }
+    // --- SECTION 2: A PENDING ORDER WAS DELETED ---
     else if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
     {
         if(req.magic == Magic_Main || req.magic == Magic_Scalp)
@@ -3277,7 +3312,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         }
     }
 }
-
 //+------------------------------------------------------------------+
 //| Custom Optimization Criterion: Profit-to-Drawdown under 10%      |
 //+------------------------------------------------------------------+
