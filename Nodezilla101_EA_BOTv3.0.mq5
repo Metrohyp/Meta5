@@ -3313,15 +3313,39 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
     }
 }
 //+------------------------------------------------------------------+
-//| Custom Optimization Criterion: Profit-to-Drawdown under 10%      |
+//| Custom Optimization Criterion: (Recovery Factor * Profit Factor)
+//|                          (With hard filters for DD & PF)
 //+------------------------------------------------------------------+
 double OnTester()
 {
-    double netProfit   = TesterStatistics(STAT_PROFIT);
-    double drawdownPct = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
-    
+    // --- 1. Get all the key statistics ---
+    double netProfit       = TesterStatistics(STAT_PROFIT);
+    double drawdownPct     = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
+    double profitFactor    = TesterStatistics(STAT_PROFIT_FACTOR);
+    double recoveryFactor  = TesterStatistics(STAT_RECOVERY_FACTOR);
+
+    // --- 2. Apply Hard Filters (Return 0.0 for any "failure") ---
+
+    // FILTER 1: Your original rule. Reject any pass with > 10% drawdown.
     if (drawdownPct > 10.0)
         return 0.0;
+
+    // FILTER 2: Reject any pass that wasn't profitable.
+    if (netProfit <= 0.0)
+        return 0.0;
+
+    // FILTER 3: Reject any pass with a low Profit Factor (e.g., less than 1.3)
+    // This means it must make at least $1.30 for every $1.00 lost.
+    if (profitFactor < 1.3)
+        return 0.0;
+
+    // --- 3. Calculate the Final "Quality Score" ---
+    //
+    // If the pass survived all filters, calculate its score.
+    // We multiply Recovery Factor by Profit Factor. This heavily rewards
+    // strategies that are both highly profitable (PF) AND robust (RF).
+    //
+    double qualityScore = recoveryFactor * profitFactor;
     
-    return netProfit / (drawdownPct + 1.0);
+    return qualityScore;
 }
